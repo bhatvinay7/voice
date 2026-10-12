@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  scheduler:
+    image: ${REGISTRY:-docker.io/myrepo}/real-estate-scheduler:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: crates/services/scheduler/Dockerfile
+    ports:
+      - "50051:50051"
+      - "9090:9090"
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  worker:
+    image: ${REGISTRY:-docker.io/myrepo}/real-estate-worker:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: crates/services/worker/Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  backend:
+    image: ${REGISTRY:-docker.io/myrepo}/real-estate-backend:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: crates/services/server/Dockerfile
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+      - crates/services/server/.env
+      - crates/libs/orchestrator/.env
+      - crates/libs/agent/.env
+    environment:
+      - SCHEDULER_ENDPOINT=http://scheduler:50051
+    depends_on:
+      - scheduler
+    restart: unless-stopped
+
+  web:
+    image: ${REGISTRY:-docker.io/myrepo}/real-estate-web:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_LIVEKIT_URL: ${LIVEKIT_URL:-wss://estate-12gbyba5.livekit.cloud}
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+      - apps/web/.env.local
+    environment:
+      - BACKEND_URL=http://backend:4000
+    depends_on:
+      - backend
+    restart: unless-stopped

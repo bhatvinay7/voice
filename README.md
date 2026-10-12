@@ -1,159 +1,82 @@
-# Turborepo starter
+# UAE Real Estate Voice Assistant
 
-This Turborepo starter is maintained by the Turborepo core team.
+A Rust and Next.js application for real-estate voice calls, property and knowledge search, viewing bookings, contract review, and call summaries. The development Compose stack runs the web app, backend API, scheduler, and summary worker. LiveKit, Redis, Cloudflare R2, and the configured LLM provider are external dependencies.
 
-## Using this example
+## Architecture
 
-Run the following command:
+```mermaid
+flowchart TB
+    Browser[Browser / Next.js web app]
+    Backend["Axum backend<br/>REST, WebSocket, SSE"]
+    Dispatcher[Orchestrator dispatcher]
+    Session[Per-call SessionActor]
+    STS["LiveKit STS worker<br/>VAD, STT, TTS"]
+    Agent[LLM agent actor]
+    Scheduler["Scheduler gRPC<br/>cell control and tool execution"]
+    RAG["RAG pipeline<br/>listings and knowledge"]
+    Recording["Recording worker<br/>sample-timed PCM → stereo WAV"]
+    R2[(Cloudflare R2)]
+    Redis[(Redis)]
+    Worker[Summary worker]
+    LLM[Configured LLM provider]
+    Store["DatabaseStore<br/>process-local domain data"]
+    LiveKit[(LiveKit Cloud)]
 
-```sh
-npx create-turbo@latest
+    Browser -->|HTTP requests| Backend
+    Backend -->|SSE suggestions| Browser
+    Browser <-->|WebRTC media| LiveKit
+    Backend --> Dispatcher --> Session
+    Backend <-->|CellControl gRPC stream| Scheduler
+    Session --> STS
+    Session --> Agent
+    STS <-->|agent audio tracks| LiveKit
+    STS -->|final transcripts| Session
+    STS -->|user and assistant PCM| Recording
+    Agent -->|tool requests| Scheduler
+    Scheduler --> RAG --> Store
+    Agent -->|conversation events| Redis
+    Recording -->|assembled WAV| R2
+    Recording -->|recording URL| Store
+    Redis -->|summary job and transcript| Worker
+    Worker --> LLM
+    Worker -->|summary| Redis
 ```
 
-## What's inside?
+## Call workflow
 
-This Turborepo includes the following packages/apps:
+When a caller starts a session, the backend creates a per-call `SessionActor` and returns the credentials needed to join a LiveKit room. The browser sends and receives audio directly through LiveKit; the backend's STS worker joins the same room to process incoming audio and publish the assistant's voice. VAD detects speech, STT produces a transcript, and the agent uses listing or knowledge context to answer. When a tool is needed, the agent calls the scheduler over gRPC, where the RAG and booking tools run.
 
-### Apps and Packages
+User and assistant PCM frames are collected alongside the live call. When the session ends, the recording worker places frames on a sample-based timeline, assembles separate speaker tracks into a stereo 16 kHz WAV, and uploads it to Cloudflare R2. Conversation events and summary jobs use Redis. The worker loads the transcript events for a completed call, asks the configured LLM to summarize them, and saves the summary.
 
-- `docs`: a [Next.js](https://nextjs.org/) app
-- `web`: another [Next.js](https://nextjs.org/) app
-- `@repo/ui`: a stub React component library shared by both `web` and `docs` applications
-- `@repo/eslint-config`: `eslint` configurations (includes `@next/eslint-plugin-next` and `eslint-config-prettier`)
-- `@repo/typescript-config`: `tsconfig.json`s used throughout the monorepo
+## Services
 
-Each package/app is 100% [TypeScript](https://www.typescriptlang.org/).
+| Service | Role |
+|---|---|
+| `web` | Next.js caller and admin interface. |
+| `backend` | Axum APIs, LiveKit token issuance, session orchestration, and SSE. |
+| `scheduler` | Cell control stream and gRPC tool execution for RAG and bookings. |
+| `worker` | Redis summary-job polling, transcript loading, and LLM summaries. |
 
-### Utilities
+## Run locally
 
-This Turborepo has some additional tools already setup for you:
+From this directory:
 
-- [TypeScript](https://www.typescriptlang.org/) for static type checking
-- [ESLint](https://eslint.org/) for code linting
-- [Prettier](https://prettier.io) for code formatting
-
-### Build
-
-To build all apps and packages, run the following command:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo build
+```bash
+docker compose -f docker-compose.dev.yml up --build
 ```
 
-Without global `turbo`, use your package manager:
+Set the required service configuration in the relevant `.env` files before starting the stack. Compose starts the four services above; configure LiveKit, Redis, R2, and the LLM provider separately. No PostgreSQL service is included in the current development Compose stack, and each Rust service owns its own `DatabaseStore` process state.
 
-```sh
-cd my-turborepo
-npx turbo build
-bun exec turbo build
-bun exec turbo build
-```
+The web app is served on port `3000`, the backend on `4000`, and the scheduler gRPC service on `50051` (metrics on `9090`).
 
-You can build a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
+## Repository layout
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo build --filter=docs
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo build --filter=docs
-bun exec turbo build --filter=docs
-bun exec turbo build --filter=docs
-```
-
-### Develop
-
-To develop all apps and packages, run the following command:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo dev
-```
-
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo dev
-bun exec turbo dev
-bun exec turbo dev
-```
-
-You can develop a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo dev --filter=web
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo dev --filter=web
-bun exec turbo dev --filter=web
-bun exec turbo dev --filter=web
-```
-
-### Remote Caching
-
-> [!TIP]
-> Vercel Remote Cache is free for all plans. Get started today at [vercel.com](https://vercel.com/signup?utm_source=remote-cache-sdk&utm_campaign=free_remote_cache).
-
-Turborepo can use a technique known as [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching) to share cache artifacts across machines, enabling you to share build caches with your team and CI/CD pipelines.
-
-By default, Turborepo will cache locally. To enable Remote Caching you will need an account with Vercel. If you don't have an account you can [create one](https://vercel.com/signup?utm_source=turborepo-examples), then enter the following commands:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo login
-```
-
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo login
-bun exec turbo login
-bun exec turbo login
-```
-
-This will authenticate the Turborepo CLI with your [Vercel account](https://vercel.com/docs/concepts/personal-accounts/overview).
-
-Next, you can link your Turborepo to your Remote Cache by running the following command from the root of your Turborepo:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo link
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo link
-bun exec turbo link
-bun exec turbo link
-```
-
-## Useful Links
-
-Learn more about the power of Turborepo:
-
-- [Tasks](https://turborepo.dev/docs/crafting-your-repository/running-tasks)
-- [Caching](https://turborepo.dev/docs/crafting-your-repository/caching)
-- [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching)
-- [Filtering](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters)
-- [Configuration Options](https://turborepo.dev/docs/reference/configuration)
-- [CLI Usage](https://turborepo.dev/docs/reference/command-line-reference)
+- `apps/web` — Next.js application
+- `crates/services/server` — backend API
+- `crates/services/scheduler` — cell control and tool execution service
+- `crates/services/worker` — call summary worker
+- `crates/libs/orchestrator` — session actors, LiveKit STS, recording assembly, and R2 upload
+- `crates/libs/agent` — LLM agent and tool request handling
+- `crates/libs/rag` — listing and knowledge retrieval
+- `crates/libs/db` — domain store and Redis integration
+- `proto` — gRPC protocol definitions
