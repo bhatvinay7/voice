@@ -41,6 +41,22 @@ spec.md
 spec0.md
 .env
 .env.*
-
+**/.env
+**/.env.*
 *.tsbuildinfo
 next-env.d.ts
+
+# GitOps manifests live in their own repository (bhatvinay7/voice-k8s)
+voice-k8s
+.tmp-k8s
+
+# Local native build artifacts and downloaded SDKs
+target/
+.pkgconfig/
+.cargo/config.toml
+crates/services/server/webrtc/
+
+# Explicitly excluded from this repository
+.github/
+seed.js
+voice-k8s/

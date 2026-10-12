@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Secrets: runtime config comes from the cluster, never from the image
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Dependencies (re-installed inside Docker)
+**/node_modules
+
+# Build outputs
+**/target
+**/.next
+**/dist
+**/build
+**/*.tsbuildinfo
+crates/services/server/webrtc
+.pkgconfig
+.cargo/config.toml
+
+# Local state and docs
+.local_data
+spec*.md
+thought.md
+voice-k8s
+.github
