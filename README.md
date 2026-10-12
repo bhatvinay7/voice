@@ -1,4 +1,4 @@
-# UAE Real Estate Voice Assistant
+# Real Estate Voice Assistant
 
 A Rust and Next.js application for real-estate voice calls, property and knowledge search, viewing bookings, contract review, and call summaries. The development Compose stack runs the web app, backend API, scheduler, and summary worker. LiveKit, Redis, Cloudflare R2, and the configured LLM provider are external dependencies.
 
