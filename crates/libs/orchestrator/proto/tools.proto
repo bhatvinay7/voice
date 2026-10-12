@@ -1,0 +1,19 @@
+syntax = "proto3";
+package tools;
+
+service ToolExecutionService {
+    rpc ExecuteTool (ToolRequest) returns (ToolResponse);
+}
+
+message ToolRequest {
+    string run_id = 1;
+    string task_id = 2;
+    string tool_name = 3;
+    string args_json = 4;
+}
+
+message ToolResponse {
+    bool success = 1;
+    string result_json = 2;
+    string error_message = 3;
+}
