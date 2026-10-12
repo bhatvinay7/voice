@@ -1,7 +1,9 @@
 "use client";
 
-import React, { JSX } from "react";
+import React from "react";
 import { useAdminLogs, useAdminCallSummaries } from "../lib/api";
+import { formatCallTiming } from "../lib/formatters";
+import { formatEventPayload } from "../lib/admin-formatters";
 
 export function AdminLogsConsole(): React.ReactElement {
   const { data: logsData, isLoading: logsLoading } = useAdminLogs();
@@ -9,61 +11,67 @@ export function AdminLogsConsole(): React.ReactElement {
 
   return (
     <div className="space-y-6">
-      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4">
+      <div className="bg-theme-card border border-theme-border rounded-2xl p-6 space-y-4 transition-colors duration-300">
         <div className="flex justify-between items-center">
           <div>
-            <h3 className="text-xl font-bold text-white">Upstash Redis Streams Logs Console</h3>
-            <p className="text-xs text-slate-400">
+            <h3 className="text-xl font-bold text-theme-text font-serif">Upstash Redis Streams Logs Console</h3>
+            <p className="text-xs text-theme-sub">
               Live event streams (`stream:audit`, `stream:conversation`, `stream:logs`) mapped by sessionId & traceId
             </p>
           </div>
-          <span className="text-xs bg-emerald-950 text-emerald-400 px-3 py-1 rounded-full border border-emerald-800 font-mono">
-            Consumer Group: postgres-db-sync-group (XREADGROUP / XACK)
-          </span>
         </div>
 
         {logsLoading ? (
-          <p className="text-xs text-slate-400">Loading diagnostic logs...</p>
+          <p className="text-xs text-theme-sub">Loading diagnostic logs...</p>
         ) : (
-          <div className="bg-slate-950 p-4 rounded-xl font-mono text-xs max-h-72 overflow-y-auto space-y-2 border border-slate-800">
+          <div className="bg-theme-main p-4 rounded-xl font-mono text-xs max-h-72 overflow-y-auto space-y-2 border border-theme-border">
             {logsData?.logs.map((log, idx) => (
-              <div key={idx} className="p-2 rounded bg-slate-900/80 border border-slate-800 text-slate-300">
-                <span className="text-cyan-400 font-bold">[{log.timestamp}]</span>{" "}
-                <span className="text-purple-400">[{log.stream}]</span>{" "}
+              <div key={idx} className="p-2 rounded bg-theme-card border border-theme-border text-theme-text">
+                <span className="text-cyan-400 font-bold">[{formatCallTiming(log.timestamp)}]</span>{" "}
+                <span className="text-indigo-400">[{log.stream}]</span>{" "}
                 <span className="text-emerald-400">[{log.event_type}]</span>{" "}
-                <span className="text-slate-400">session={log.session_id} trace={log.trace_id}</span>
-                <p className="text-slate-200 mt-1 break-all">{log.payload_json}</p>
+                <span className="text-theme-sub">session={log.session_id} trace={log.trace_id}</span>
+                <p className="text-theme-text mt-1 break-words">{formatEventPayload(log.payload_json)}</p>
               </div>
             ))}
+            {!logsData?.logs.length && <p className="text-theme-sub">No events have been recorded yet.</p>}
           </div>
         )}
       </div>
 
-      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4">
+      <div className="bg-theme-card border border-theme-border rounded-2xl p-6 space-y-4 transition-colors duration-300">
         <div>
-          <h3 className="text-xl font-bold text-white">Call Transcripts & AI Summaries</h3>
-          <p className="text-xs text-slate-400">
-            Cloudflare R2 transcript dumps & PostgreSQL structured summaries
+          <h3 className="text-xl font-bold text-theme-text font-serif">Call Transcripts & AI Summaries</h3>
+          <p className="text-xs text-theme-sub">
+            Recorded conversations and saved session details
           </p>
         </div>
 
         {summariesLoading ? (
-          <p className="text-xs text-slate-400">Loading call summaries...</p>
+          <p className="text-xs text-theme-sub">Loading call summaries...</p>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {summariesData?.summaries.map((summary) => (
-              <div key={summary.call_id} className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
+              <div key={summary.call_id} className="bg-theme-main p-4 rounded-xl border border-theme-border space-y-2">
                 <div className="flex justify-between items-center text-xs">
-                  <span className="font-bold text-white">Call ID: {summary.call_id}</span>
-                  <span className="text-emerald-400 font-semibold">${summary.qualified_budget.toLocaleString()} Budget</span>
+                  <span className="font-bold text-theme-text">Call ID: {summary.call_id}</span>
                 </div>
-                <p className="text-xs text-slate-300">{summary.summary}</p>
-                <div className="text-[10px] text-slate-500 font-mono space-y-1">
-                  <p>R2 Transcript: {summary.r2_transcript_path}</p>
-                  <p>R2 Audio: {summary.r2_audio_path}</p>
+                {summary.summary && <p className="text-xs text-theme-sub">{summary.summary}</p>}
+                <p className="text-xs text-theme-sub">{formatCallTiming(summary.created_at)}</p>
+                {summary.audio_presigned_url && (
+                  <audio controls preload="none" src={summary.audio_presigned_url} className="w-full h-8" />
+                )}
+                <div className="flex gap-4 text-xs">
+                  {summary.text_presigned_url && <a className="text-cyan-400 hover:text-cyan-300" href={summary.text_presigned_url}>Transcript</a>}
+                  {!summary.audio_presigned_url && <span className="text-theme-sub">Recording unavailable</span>}
                 </div>
               </div>
             ))}
+            {!summariesData?.summaries.length && (
+              <p className="col-span-full py-8 text-center text-sm text-theme-sub">
+                No saved call recordings are available yet.
+              </p>
+            )}
           </div>
         )}
       </div>
