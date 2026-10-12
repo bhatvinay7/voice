@@ -1,0 +1,29 @@
+[package]
+name = "scheduler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+futures-util = { workspace = true }
+tokio-stream = { workspace = true }
+dashmap = "6.2"
+crossbeam-utils = "0.8"
+prometheus = { workspace = true }
+lazy_static = { workspace = true }
+axum = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+db = { path = "../../libs/db" }
+rag = { path = "../../libs/rag" }
+config = { path = "../../libs/config" }
+serde_json = { workspace = true }
+dotenvy = { workspace = true }
+[build-dependencies]
+tonic-build = "0.12"
