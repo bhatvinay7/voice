@@ -7,36 +7,128 @@ import { AdminGraphEditor } from "../../components/AdminGraphEditor";
 import { AdminContractReview } from "../../components/AdminContractReview";
 import { AdminCallSummaries } from "../../components/AdminCallSummaries";
 import { AdminLogsConsole } from "../../components/AdminLogsConsole";
+import { AdminSidebar } from "../../components/admin/AdminSidebar";
+import { AdminErrorBoundary } from "../../components/admin/AdminErrorBoundary";
 import { PrivateRoute } from "../../components/PrivateRoute";
-import { useUserProfile, useGoogleLogin } from "../../lib/api";
-import { motion } from "framer-motion";
-import { ShieldAlert, Database, Cpu, Activity, Workflow } from "lucide-react";
+import { useUserProfile } from "../../lib/api";
+import { motion, AnimatePresence } from "framer-motion";
+import { ShieldAlert, Sparkles, Layers } from "lucide-react";
+import { AdminTab } from "../../../types/admin";
 
 export default function AdminPortalPage() {
   const [agentModeActive, setAgentModeActive] = useState(true);
-  const { data: userData } = useUserProfile();
-  const googleLoginMutation = useGoogleLogin();
+  const [activeTab, setActiveTab] = useState<AdminTab>("all");
+  const { data: userData, isLoading } = useUserProfile();
 
-  const user = userData?.user || {
-    id: "user-admin",
-    name: "System Administrator",
-    email: "admin@estate.ae",
-    phone: "+971500000999",
-    is_verified: true,
-    role: "admin",
+  const user = userData?.user ?? null;
+
+  const renderContent = () => {
+    switch (activeTab) {
+      case "ingestion":
+        return (
+          <motion.div
+            key="ingestion"
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -15 }}
+            transition={{ duration: 0.2 }}
+          >
+            <AdminErrorBoundary title="Data Ingestion">
+              <AdminDataIngestion />
+            </AdminErrorBoundary>
+          </motion.div>
+        );
+      case "workflows":
+        return (
+          <motion.div
+            key="workflows"
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -15 }}
+            transition={{ duration: 0.2 }}
+          >
+            <AdminErrorBoundary title="Workflows DAG">
+              <AdminGraphEditor />
+            </AdminErrorBoundary>
+          </motion.div>
+        );
+      case "contracts":
+        return (
+          <motion.div
+            key="contracts"
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -15 }}
+            transition={{ duration: 0.2 }}
+          >
+            <AdminErrorBoundary title="Contract Review Queue">
+              <AdminContractReview />
+            </AdminErrorBoundary>
+          </motion.div>
+        );
+      case "calls":
+        return (
+          <motion.div
+            key="calls"
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -15 }}
+            transition={{ duration: 0.2 }}
+          >
+            <AdminErrorBoundary title="Call Summaries">
+              <AdminCallSummaries />
+            </AdminErrorBoundary>
+          </motion.div>
+        );
+      case "logs":
+        return (
+          <motion.div
+            key="logs"
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -15 }}
+            transition={{ duration: 0.2 }}
+          >
+            <AdminErrorBoundary title="Logs Console">
+              <AdminLogsConsole />
+            </AdminErrorBoundary>
+          </motion.div>
+        );
+      case "all":
+      default:
+        return (
+          <motion.div
+            key="all"
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -15 }}
+            transition={{ duration: 0.2 }}
+            className="space-y-10"
+          >
+            <AdminErrorBoundary title="Data Ingestion">
+              <AdminDataIngestion />
+            </AdminErrorBoundary>
+            <AdminErrorBoundary title="Workflows DAG">
+              <AdminGraphEditor />
+            </AdminErrorBoundary>
+            <AdminErrorBoundary title="Contract Review Queue">
+              <AdminContractReview />
+            </AdminErrorBoundary>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
+              <AdminErrorBoundary title="Call Summaries">
+                <AdminCallSummaries />
+              </AdminErrorBoundary>
+              <AdminErrorBoundary title="Logs Console">
+                <AdminLogsConsole />
+              </AdminErrorBoundary>
+            </div>
+          </motion.div>
+        );
+    }
   };
 
-
-
   return (
-    <div className="min-h-screen bg-[#F8F9FA] text-slate-800 font-sans antialiased overflow-hidden selection:bg-purple-500/30 selection:text-purple-900">
-      {/* Background Gradients */}
-      <div className="fixed inset-0 z-0 pointer-events-none">
-        <div className="absolute top-[-20%] right-[-10%] w-[50%] h-[50%] rounded-full bg-purple-100/60 blur-[120px]" />
-        <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-indigo-100/60 blur-[100px]" />
-        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-5 mix-blend-overlay"></div>
-      </div>
-
+    <div className="min-h-screen bg-theme-main text-theme-text font-sans antialiased overflow-x-hidden transition-colors duration-300">
       <div className="relative z-10 flex flex-col min-h-screen">
         <Header
           user={user}
@@ -44,57 +136,52 @@ export default function AdminPortalPage() {
           onToggleAgentMode={setAgentModeActive}
         />
 
-        <main className="flex-1 max-w-7xl mx-auto px-4 md:px-6 py-24 w-full">
-          <PrivateRoute user={user} requiredRole="admin">
-            <div className="space-y-12">
-              <motion.div 
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="relative overflow-hidden flex flex-col md:flex-row md:items-center justify-between gap-6 bg-white border border-slate-200 p-8 rounded-3xl shadow-xl shadow-slate-200/50 group"
-              >
-                <div className="absolute top-0 right-0 -mt-10 -mr-10 w-40 h-40 bg-purple-100 rounded-full blur-3xl pointer-events-none group-hover:bg-purple-200 transition-all duration-700" />
-                
-                <div className="relative z-10 flex items-start gap-5">
-                  <div className="hidden sm:flex p-4 rounded-2xl bg-purple-50 border border-purple-200 text-purple-600 shadow-sm">
-                    <ShieldAlert className="w-8 h-8" />
-                  </div>
-                  <div className="space-y-2">
-                    <h2 className="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-purple-800 to-indigo-600 tracking-tight">
-                      SaaS Admin Control Center
-                    </h2>
-                    <p className="text-sm text-slate-500 max-w-xl leading-relaxed">
-                      Manage PostgreSQL & Vector DB embeddings, Memgraph DAG workflow state machines, contract queues, and R2 audio summaries.
-                    </p>
-                  </div>
-                </div>
-                
-                <div className="relative z-10 self-start md:self-center">
-                  <span className="inline-flex items-center gap-2 text-xs font-mono bg-purple-50 text-purple-700 border border-purple-200 px-4 py-2 rounded-full font-bold shadow-sm">
-                    <div className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
-                    ROLE: ADMINISTRATOR
-                  </span>
-                </div>
-              </motion.div>
+        <main className="flex-1 w-full max-w-[1920px] pt-20 pb-12 pl-2 sm:pl-3 lg:pl-4 xl:pl-5 pr-3 sm:pr-6 lg:pr-8 mx-auto">
+          <PrivateRoute user={user} isLoading={isLoading} requiredRole="admin">
+            <div className="flex flex-col lg:flex-row gap-5 lg:gap-6 items-start">
+              {/* Admin Sidebar Navigation */}
+              <AdminSidebar
+                activeTab={activeTab}
+                onSelectTab={setActiveTab}
+                user={user}
+              />
 
-              <div className="grid grid-cols-1 gap-10">
-                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
-                  <AdminDataIngestion />
-                </motion.div>
-                
-                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
-                  <AdminGraphEditor />
-                </motion.div>
-                
-                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
-                  <AdminContractReview />
-                </motion.div>
-                
-                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
-                    <AdminCallSummaries />
-                    <AdminLogsConsole />
+              {/* Main Content Area */}
+              <div className="flex-1 min-w-0 w-full space-y-6">
+                {/* Control Center Banner */}
+                <motion.div
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="relative overflow-hidden flex flex-col md:flex-row md:items-center justify-between gap-6 bg-theme-card border border-theme-border dark:border-white/15 p-6 sm:p-8 rounded-3xl group transition-colors duration-300 shadow-xl dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+                >
+                  <div className="relative z-10 flex items-start gap-5">
+                    <div className="hidden sm:flex p-3.5 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
+                      <ShieldAlert className="w-7 h-7" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-3">
+                        <h2 className="text-2xl sm:text-3xl font-extrabold text-theme-text tracking-tight font-serif">
+                          SaaS Admin Control Center
+                        </h2>
+                      </div>
+                      <p className="text-xs sm:text-sm text-theme-sub max-w-xl leading-relaxed">
+                        Manage PostgreSQL & Vector DB embeddings, Memgraph DAG workflow state machines, contract queues, and audio summaries.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="relative z-10 self-start md:self-center flex items-center gap-2">
+                    <span className="inline-flex items-center gap-2 text-xs font-mono bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 px-3.5 py-1.5 rounded-full font-bold shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]">
+                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                      ROLE: ADMINISTRATOR
+                    </span>
                   </div>
                 </motion.div>
+
+                {/* Tabbed Content View */}
+                <AnimatePresence mode="wait">
+                  {renderContent()}
+                </AnimatePresence>
               </div>
             </div>
           </PrivateRoute>
