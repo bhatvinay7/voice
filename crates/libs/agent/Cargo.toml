@@ -1,0 +1,18 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+config = { path = "../config" }
+pubsub = { path = "../pubsub" }
+db = { path = "../db" }
+rag = { path = "../rag" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+orchestrator = { path = "../orchestrator" }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
