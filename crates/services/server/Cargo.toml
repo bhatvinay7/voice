@@ -1,0 +1,40 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+config = { path = "../../libs/config" }
+pubsub = { path = "../../libs/pubsub" }
+db = { path = "../../libs/db" }
+rag = { path = "../../libs/rag" }
+orchestrator = { path = "../../libs/orchestrator" }
+agent = { path = "../../libs/agent" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures-util = { workspace = true }
+chrono = { workspace = true }
+tokio-stream = { workspace = true }
+livekit-api = { workspace = true }
+livekit = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = { workspace = true }
+sled = "0.34.7"
+dotenvy.workspace = true
+prometheus = { workspace = true }
+lazy_static = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+
+[[test]]
+name = "integration_tests"
+path = "../../../tests/integration_tests.rs"
