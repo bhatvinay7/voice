@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package scheduler;
+
+service CellControl {
+    // A single long-lived bidirectional stream for all cell-scheduler communication.
+    rpc ConnectStream(stream CellMessage) returns (stream SchedulerMessage);
+}
+
+// Messages sent from the Cell to the Scheduler
+message CellMessage {
+    oneof msg {
+        RegisterCell register = 1;
+        SlotUpdate slot_update = 2;
+        SessionStarted session_started = 3;
+        SessionEnded session_ended = 4;
+        Heartbeat heartbeat = 5;
+    }
+}
+
+// Messages sent from the Scheduler to the Cell
+message SchedulerMessage {
+    oneof msg {
+        StartSession start_session = 1;
+        CancelSession cancel_session = 2;
+        StopSession stop_session = 3;
+        Drain drain = 4;
+        Ping ping = 5;
+    }
+}
+
+message RegisterCell {
+    string cell_id = 1;
+    uint32 capacity = 2;
+    uint32 active_sessions = 3;
+    uint32 free_slots = 4;
+    string status = 5;
+}
+
+message SlotUpdate {
+    uint32 free_slots = 1;
+    uint64 sequence_number = 2;
+}
+
+message SessionStarted {
+    string session_id = 1;
+    string cell_id = 2;
+}
+
+message SessionEnded {
+    string session_id = 1;
+    string cell_id = 2;
+}
+
+message Heartbeat {
+    string cell_id = 1;
+    uint32 capacity = 2;
+    uint32 active_sessions = 3;
+    uint32 free_slots = 4;
+    string status = 5;
+}
+
+message StartSession {
+    string session_id = 1;
+}
+
+message CancelSession {
+    string session_id = 1;
+}
+
+message StopSession {
+    string session_id = 1;
+}
+
+message Drain {}
+
+message Ping {}

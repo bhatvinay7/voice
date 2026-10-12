@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/libs/config",
+    "crates/libs/pubsub",
+    "crates/libs/db",
+    "crates/libs/rag",
+    "crates/libs/orchestrator",
+    "crates/libs/agent",
+    "crates/services/server",
+    "crates/services/scheduler",
+    "crates/services/worker",
+    "tests",
+]
+
+[workspace.dependencies]
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = { version = "0.7", features = ["time"] }
+axum = { version = "0.8", features = ["ws"] }
+tonic = "0.12"
+prost = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+redis = { version = "0.29", features = ["tokio-comp", "aio"] }
+dotenvy = "0.15"
+uuid = { version = "1.15", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["time", "sync"] }
+prometheus = "0.13"
+lazy_static = "1.4"
+opentelemetry = "0.21"
+opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.14", features = ["grpc-tonic", "tokio"] }
+tracing-opentelemetry = "0.22"
+livekit = { version = "0.9.3", features = ["native-tls", "rustls-tls-native-roots"] }
+livekit-api = { version = "0.8.1", features = ["native-tls", "rustls-tls-native-roots", "signal-client-native"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls", "rustls-tls-native-roots"] }
+tungstenite = { version = "0.29", features = ["native-tls", "rustls-tls-native-roots"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }

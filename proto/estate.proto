@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package estate;
+
+// Agent Service gRPC Interface
+service AgentService {
+  rpc ExecuteAgentTask (AgentTaskRequest) returns (AgentTaskResponse);
+  rpc StreamHeartbeat (HeartbeatRequest) returns (stream HeartbeatResponse);
+}
+
+message AgentTaskRequest {
+  string call_id = 1;
+  string user_id = 2;
+  string tool_name = 3;
+  string payload_json = 4;
+  string idempotency_key = 5;
+  string rag_context_json = 6;
+}
+
+message AgentTaskResponse {
+  bool success = 1;
+  string result_json = 2;
+  string response_text = 3;
+  string error_code = 4;
+  string error_message = 5;
+}
+
+message HeartbeatRequest {
+  string task_id = 1;
+}
+
+message HeartbeatResponse {
+  string task_id = 2;
+  uint32 progress_pct = 3;
+  string status = 4;
+}
+
+// RAG Service gRPC Interface
+service RagService {
+  rpc SearchListings (RagSearchRequest) returns (RagSearchResponse);
+}
+
+message RagSearchRequest {
+  string query = 1;
+  string city = 2;
+  uint64 max_price_aed = 3;
+  uint32 bedrooms = 4;
+}
+
+message RagSearchResponse {
+  bool success = 1;
+  string listings_json = 2;
+  uint32 total_found = 3;
+}
+
+// Orchestrator Service gRPC Interface
+service OrchestratorService {
+  rpc ProcessCallSession (SessionRequest) returns (SessionResponse);
+}
+
+message SessionRequest {
+  string call_id = 1;
+  string user_id = 2;
+  string input_text = 3;
+  string language = 4;
+}
+
+message SessionResponse {
+  bool success = 1;
+  string speech_response = 2;
+  string active_step = 3;
+}
