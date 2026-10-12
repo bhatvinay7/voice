@@ -5,6 +5,7 @@ import { PropertyListing } from "../../types/listing";
 import { useBookViewingSlot } from "../lib/api";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, MapPin, Home, Calendar, ChevronRight, Sparkles } from "lucide-react";
+import { formatNumber } from "../lib/formatters";
 
 interface PropertySearchProps {
   listings: PropertyListing[];
@@ -76,24 +77,20 @@ export function PropertySearch({
       <motion.div 
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        className="relative overflow-hidden rounded-[2rem] p-8 md:p-10 border border-slate-700/50 bg-gradient-to-br from-slate-900/80 via-slate-900/90 to-[#0c142e] shadow-2xl group"
+        className="relative overflow-hidden rounded-[2rem] p-8 md:p-10 border border-theme-border dark:border-white/15 bg-theme-main group transition-colors duration-300 dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]"
       >
-        {/* Glow Effects */}
-        <div className="absolute top-0 right-0 -mt-20 -mr-20 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none group-hover:bg-cyan-500/20 transition-all duration-700" />
-        <div className="absolute bottom-0 left-0 -mb-20 -ml-20 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none group-hover:bg-indigo-500/20 transition-all duration-700" />
-        
         <div className="relative z-10 flex flex-col md:flex-row md:items-end justify-between gap-6">
           <div className="space-y-4 max-w-2xl">
-            <div className="inline-flex items-center space-x-2 bg-indigo-500/10 border border-indigo-500/20 px-3 py-1 rounded-full">
-              <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-              <span className="text-xs font-bold tracking-widest text-indigo-300 uppercase">
+            <div className="inline-flex items-center space-x-2 bg-theme-main border border-theme-border dark:border-white/20 px-3 py-1 rounded-full shadow-[inset_0_1px_0_0_rgba(255,255,255,0.15)]">
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-xs font-bold tracking-widest text-theme-text uppercase">
                 {agentModeActive ? "AI Autonomous Mode ACTIVE" : "Manual Search Mode"}
               </span>
             </div>
-            <h2 className="text-3xl md:text-4xl font-extrabold text-white tracking-tight">
+            <h2 className="text-3xl md:text-4xl font-extrabold text-theme-text tracking-tight font-serif">
               Premium Properties
             </h2>
-            <p className="text-slate-400 text-sm md:text-base leading-relaxed">
+            <p className="text-theme-sub text-sm md:text-base leading-relaxed">
               Browse verified listings globally. {agentModeActive ? "Our AI assistant is active to handle voice queries, natural language filtering, and instant slot reservations." : "Use manual controls to filter properties."}
             </p>
           </div>
@@ -107,10 +104,10 @@ export function PropertySearch({
             initial={{ opacity: 0, y: -10, height: 0 }}
             animate={{ opacity: 1, y: 0, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className={`p-4 rounded-xl text-sm font-medium border flex items-center shadow-lg ${
+            className={`p-4 rounded-xl text-sm font-medium border flex items-center shadow-lg dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)] ${
               bookingMessage.isError
-                ? "bg-rose-500/10 text-rose-200 border-rose-500/20"
-                : "bg-emerald-500/10 text-emerald-200 border-emerald-500/20"
+                ? "bg-rose-500/10 text-rose-300 border-rose-500/30"
+                : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
             }`}
           >
             <div className={`w-2 h-2 rounded-full mr-3 ${bookingMessage.isError ? "bg-rose-500" : "bg-emerald-500"}`} />
@@ -124,24 +121,24 @@ export function PropertySearch({
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.1 }}
-        className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-slate-900/50 backdrop-blur-xl p-3 rounded-2xl border border-slate-700/50 shadow-xl"
+        className="grid grid-cols-1 md:grid-cols-12 gap-4 bg-theme-main p-3 rounded-2xl border border-theme-border dark:border-white/15 dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]"
       >
         <div className="md:col-span-6 relative group">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-cyan-400 transition-colors" />
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-theme-sub group-focus-within:text-theme-text transition-colors" />
           <input
             type="text"
             placeholder="Search location or title (e.g. Downtown, Westside)..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full bg-slate-950/50 border border-slate-700/50 text-white rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all shadow-inner"
+            className="w-full bg-theme-card border border-theme-border dark:border-white/15 text-theme-text rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-theme-accent transition-all placeholder:text-theme-sub dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]"
           />
         </div>
         <div className="md:col-span-3 relative group">
-          <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-cyan-400 transition-colors" />
+          <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-theme-sub group-focus-within:text-theme-text transition-colors" />
           <select
             value={selectedCity}
             onChange={(e) => setSelectedCity(e.target.value)}
-            className="w-full appearance-none bg-slate-950/50 border border-slate-700/50 text-white rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all shadow-inner"
+            className="w-full appearance-none bg-theme-card border border-theme-border dark:border-white/15 text-theme-text rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-theme-accent transition-all dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]"
           >
             <option value="All">All Regions</option>
             <option value="Metropolis">Metropolis</option>
@@ -150,11 +147,11 @@ export function PropertySearch({
           </select>
         </div>
         <div className="md:col-span-3 relative group">
-          <Home className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-cyan-400 transition-colors" />
+          <Home className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-theme-sub group-focus-within:text-theme-text transition-colors" />
           <select
             value={selectedType}
             onChange={(e) => setSelectedType(e.target.value)}
-            className="w-full appearance-none bg-slate-950/50 border border-slate-700/50 text-white rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all shadow-inner"
+            className="w-full appearance-none bg-theme-card border border-theme-border dark:border-white/15 text-theme-text rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-theme-accent transition-all dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]"
           >
             <option value="All">Rent & Buy</option>
             <option value="rent">For Rent</option>
@@ -173,19 +170,19 @@ export function PropertySearch({
         {isLoading ? (
           // Loading Skeletons
           Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="bg-[#0a0f1c] border border-slate-800 rounded-3xl overflow-hidden shadow-lg p-6 flex flex-col justify-between h-[340px]">
+            <div key={i} className="bg-theme-card border border-theme-border dark:border-white/15 rounded-3xl overflow-hidden p-6 flex flex-col justify-between h-[340px] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
               <div className="space-y-4">
                 <div className="flex justify-between items-start">
-                  <div className="w-20 h-6 bg-slate-800 rounded-full animate-pulse"></div>
-                  <div className="w-24 h-6 bg-slate-800 rounded-lg animate-pulse"></div>
+                  <div className="w-20 h-6 bg-theme-main rounded-full animate-pulse"></div>
+                  <div className="w-24 h-6 bg-theme-main rounded-lg animate-pulse"></div>
                 </div>
                 <div className="space-y-2 pt-2">
-                  <div className="w-3/4 h-6 bg-slate-800 rounded-lg animate-pulse"></div>
-                  <div className="w-1/2 h-4 bg-slate-800 rounded-lg animate-pulse"></div>
-                  <div className="w-full h-10 bg-slate-800 rounded-lg animate-pulse mt-4"></div>
+                  <div className="w-3/4 h-6 bg-theme-main rounded-lg animate-pulse"></div>
+                  <div className="w-1/2 h-4 bg-theme-main rounded-lg animate-pulse"></div>
+                  <div className="w-full h-10 bg-theme-main rounded-lg animate-pulse mt-4"></div>
                 </div>
               </div>
-              <div className="w-full h-10 bg-slate-800 rounded-xl animate-pulse mt-6"></div>
+              <div className="w-full h-10 bg-theme-main rounded-xl animate-pulse mt-6"></div>
             </div>
           ))
         ) : (
@@ -195,56 +192,54 @@ export function PropertySearch({
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 * i }}
             key={listing.id}
-            className="group relative bg-[#0a0f1c] border border-slate-800 rounded-3xl overflow-hidden hover:border-slate-600 transition-all duration-500 shadow-lg hover:shadow-2xl hover:shadow-cyan-500/10 flex flex-col justify-between"
+            className="group relative bg-theme-card border border-theme-border dark:border-white/15 rounded-[2rem] overflow-hidden hover:border-white/40 transition-all duration-300 flex flex-col justify-between shadow-xl dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
           >
-            <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none" />
-            
-            <div className="p-6 space-y-4">
+            <div className="p-7 space-y-5">
               <div className="flex justify-between items-start">
-                <span className="text-[10px] font-bold px-3 py-1.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 uppercase tracking-wider group-hover:bg-cyan-500/10 group-hover:text-cyan-400 group-hover:border-cyan-500/20 transition-colors">
+                <span className="text-[10px] font-bold px-3 py-1.5 rounded-full bg-theme-main text-theme-sub border border-theme-border dark:border-white/10 uppercase tracking-wider group-hover:text-theme-text transition-colors font-mono dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
                   {listing.listing_type === "rent" ? "For Rent" : "For Sale"}
                 </span>
-                <span className="text-xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
-                  ${listing.price.toLocaleString()} <span className="text-sm font-bold text-slate-500">{listing.listing_type === "rent" ? "/yr" : ""}</span>
+                <span className="text-xl font-extrabold text-emerald-400 font-mono">
+                  AED {formatNumber(listing.price_aed ?? listing.price)} <span className="text-xs font-bold text-theme-sub">{listing.listing_type === "rent" ? "/yr" : ""}</span>
                 </span>
               </div>
 
               <div className="space-y-2">
-                <h3 className="font-bold text-white text-lg leading-snug tracking-tight group-hover:text-cyan-50 transition-colors">{listing.title}</h3>
-                <p className="text-xs text-slate-400 flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-slate-500" />
+                <h3 className="font-bold text-theme-text text-xl leading-snug tracking-tight font-sans">{listing.title}</h3>
+                <p className="text-xs text-theme-sub flex items-center gap-1.5 font-medium">
+                  <MapPin className="w-3.5 h-3.5 text-cyan-400" />
                   {listing.location}, {listing.city}
                 </p>
-                <p className="text-xs text-slate-400/80 leading-relaxed line-clamp-2 pt-2">{listing.description}</p>
+                <p className="text-xs text-theme-sub leading-relaxed line-clamp-2 pt-1 font-normal">{listing.description}</p>
               </div>
 
-              <div className="flex items-center justify-between text-xs font-medium text-slate-300 pt-4 border-t border-slate-800/80">
-                <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-slate-900/50 w-full mr-2">
-                  <span className="text-slate-500 mb-1 text-[10px] uppercase tracking-wider">Beds</span>
-                  <span className="text-white">{listing.bedrooms}</span>
+              <div className="flex items-center justify-between text-xs font-medium text-theme-text pt-4 border-t border-theme-border dark:border-white/10">
+                <div className="flex flex-col items-center justify-center p-2.5 rounded-2xl bg-theme-main border border-theme-border dark:border-white/10 w-full mr-2 dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
+                  <span className="text-theme-sub mb-0.5 text-[10px] uppercase tracking-wider font-mono">Beds</span>
+                  <span className="text-theme-text font-bold text-sm">{listing.bedrooms}</span>
                 </div>
-                <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-slate-900/50 w-full mr-2">
-                  <span className="text-slate-500 mb-1 text-[10px] uppercase tracking-wider">Baths</span>
-                  <span className="text-white">{listing.bathrooms}</span>
+                <div className="flex flex-col items-center justify-center p-2.5 rounded-2xl bg-theme-main border border-theme-border dark:border-white/10 w-full mr-2 dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
+                  <span className="text-theme-sub mb-0.5 text-[10px] uppercase tracking-wider font-mono">Baths</span>
+                  <span className="text-theme-text font-bold text-sm">{listing.bathrooms}</span>
                 </div>
-                <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-slate-900/50 w-full">
-                  <span className="text-slate-500 mb-1 text-[10px] uppercase tracking-wider">Sqft</span>
-                  <span className="text-white">{listing.area_sqft}</span>
+                <div className="flex flex-col items-center justify-center p-2.5 rounded-2xl bg-theme-main border border-theme-border dark:border-white/10 w-full dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
+                  <span className="text-theme-sub mb-0.5 text-[10px] uppercase tracking-wider font-mono">Sqft</span>
+                  <span className="text-theme-text font-bold text-sm">{listing.area_sqft}</span>
                 </div>
               </div>
             </div>
 
-            <div className="p-5 bg-slate-900/40 border-t border-slate-800/60 backdrop-blur-sm">
+            <div className="p-5 bg-theme-main border-t border-theme-border dark:border-white/10">
               <div className="flex items-center gap-2 mb-3">
-                <Calendar className="w-3.5 h-3.5 text-cyan-500" />
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Book Viewing</p>
+                <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                <p className="text-[10px] font-bold text-theme-sub uppercase tracking-wider font-mono">Reserve Viewing Slot</p>
               </div>
               <div className="flex flex-wrap gap-2">
                 {listing.available_slots.map((slot) => (
                   <button
                     key={slot}
                     onClick={() => handleBookSlot(listing.id, slot)}
-                    className="group/btn relative text-xs bg-slate-800 hover:bg-cyan-600 text-slate-300 hover:text-white font-medium px-4 py-2 rounded-xl border border-slate-700 hover:border-cyan-500 transition-all overflow-hidden flex-1 text-center"
+                    className="text-xs bg-white dark:bg-black hover:bg-zinc-100 dark:hover:bg-zinc-900 text-black dark:text-white font-bold px-4 py-2 rounded-xl border border-slate-300 dark:border-white/20 transition-all overflow-hidden flex-1 text-center font-mono shadow-sm"
                   >
                     <span className="relative z-10 flex items-center justify-center gap-1">
                       {new Date(slot).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -252,17 +247,17 @@ export function PropertySearch({
                   </button>
                 ))}
                 {listing.available_slots.length === 0 && (
-                  <p className="text-xs text-slate-500 italic">No slots available</p>
+                  <p className="text-xs text-theme-sub italic font-mono">No slots available</p>
                 )}
               </div>
             </div>
           </motion.div>
         )))}
         {!isLoading && filteredListings.length === 0 && (
-          <div className="col-span-full py-20 flex flex-col items-center justify-center text-slate-500 border border-dashed border-slate-800 rounded-3xl">
+          <div className="col-span-full py-20 flex flex-col items-center justify-center text-theme-sub border border-dashed border-theme-border rounded-3xl">
             <Search className="w-10 h-10 mb-4 opacity-50" />
-            <p className="text-lg font-medium text-slate-400">No properties found</p>
-            <p className="text-sm mt-1 text-slate-600">Try adjusting your filters</p>
+            <p className="text-lg font-medium text-theme-text">No properties found</p>
+            <p className="text-sm mt-1 text-theme-sub">Try adjusting your filters</p>
           </div>
         )}
       </motion.div>
