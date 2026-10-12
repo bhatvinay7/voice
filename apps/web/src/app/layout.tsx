@@ -1,11 +1,23 @@
 import React from "react";
 import type { Metadata } from "next";
+import { Instrument_Serif, Inter } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
 
+const instrumentSerif = Instrument_Serif({
+  weight: ["400"],
+  subsets: ["latin"],
+  variable: "--font-serif",
+});
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-sans",
+});
+
 export const metadata: Metadata = {
-  title: "Estate AI - Autonomous Voice Agent & RAG Platform",
-  description: "Pure Rust powered AI Voice Agent & Real Estate Orchestration Platform for premium listings",
+  title: "dwin - Smart Real Estate Voice AI Platform",
+  description: "dwin is an intelligent real estate search and property orchestration platform.",
 };
 
 export default function RootLayout({
@@ -14,8 +26,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="light">
-      <body className="bg-[#F8F9FA] text-slate-900 min-h-screen font-sans antialiased selection:bg-indigo-500/30 selection:text-indigo-900">
+    <html lang="en" className={`${instrumentSerif.variable} ${inter.variable}`} suppressHydrationWarning>
+      <body className="bg-theme-main text-theme-text min-h-screen font-sans antialiased" suppressHydrationWarning>
         <Providers>{children}</Providers>
       </body>
     </html>

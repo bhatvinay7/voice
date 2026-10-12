@@ -1,64 +1,300 @@
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@300;400;500;600;700;800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+:root, html.dark, [data-theme="dark"], [data-theme="obsidian"], .dark {
+  --bg-main: #000000;
+  --bg-card: #000000;
+  --bg-card-hover: #0c0c0e;
+  --text-main: #e4e4e7;
+  --text-sub: #e4e4e7;
+  --text-card: #e4e4e7;
+  --text-card-sub: #e4e4e7;
+  --border-main: rgba(255, 255, 255, 0.16);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --accent-color: #e4e4e7;
+  --accent-cyan: #38bdf8;
+  --card-shadow: 0 14px 40px -5px rgba(0, 0, 0, 0.85), inset 0 1px 0 0 rgba(255, 255, 255, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --glass-bg: rgba(0, 0, 0, 0.95);
+  --glass-border: rgba(255, 255, 255, 0.18);
+  --inner-border-highlight: inset 0 1px 0 0 rgba(255, 255, 255, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+html.light, [data-theme="light"], .light {
+  --bg-main: #f5f4f0;
+  --bg-card: #ffffff;
+  --bg-card-hover: #eae9e4;
+  --text-main: #000000;
+  --text-sub: #000000;
+  --text-card: #000000;
+  --text-card-sub: #000000;
+  --border-main: #dcdad3;
+  --border-subtle: rgba(0, 0, 0, 0.10);
+  --accent-color: #000000;
+  --accent-cyan: #0284c7;
+  --card-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.06), inset 0 1px 0 0 rgba(255, 255, 255, 0.8);
+  --glass-bg: rgba(255, 255, 255, 0.92);
+  --glass-border: rgba(0, 0, 0, 0.10);
+  --inner-border-highlight: inset 0 1px 0 0 rgba(255, 255, 255, 0.8);
+}
+
 @layer base {
   body {
-    @apply bg-slate-50 text-slate-900 font-sans antialiased selection:bg-indigo-200 selection:text-indigo-950;
+    background-color: var(--bg-main);
+    color: var(--text-main);
+    @apply font-sans antialiased transition-colors duration-300;
   }
 }
 
-/* Light mode specific grid & crosshair utilities (DevTools Aesthetic) */
-.neo-grid {
-  background-image: 
-    linear-gradient(to right, #e2e8f0 1px, transparent 1px),
-    linear-gradient(to bottom, #e2e8f0 1px, transparent 1px);
-  background-size: 24px 24px;
+/* Light Mode: All text must strictly be black */
+html.light, [data-theme="light"], .light {
+  color: #000000 !important;
 }
 
-.neo-grid-sm {
-  background-image: 
-    linear-gradient(to right, #e2e8f0 1px, transparent 1px),
-    linear-gradient(to bottom, #e2e8f0 1px, transparent 1px);
-  background-size: 8px 8px;
+html.light body, [data-theme="light"] body, .light body,
+html.light h1, html.light h2, html.light h3, html.light h4, html.light h5, html.light h6,
+html.light p, html.light label, html.light li, html.light a, html.light button,
+html.light dt, html.light dd, html.light th, html.light td, html.light div,
+html.light b, html.light strong, html.light em, html.light small, html.light code,
+[data-theme="light"] h1, [data-theme="light"] h2, [data-theme="light"] h3, [data-theme="light"] h4, [data-theme="light"] h5, [data-theme="light"] h6,
+[data-theme="light"] p, [data-theme="light"] label, [data-theme="light"] li, [data-theme="light"] a, [data-theme="light"] button,
+[data-theme="light"] dt, [data-theme="light"] dd, [data-theme="light"] th, [data-theme="light"] td, [data-theme="light"] div,
+[data-theme="light"] b, [data-theme="light"] strong, [data-theme="light"] em, [data-theme="light"] small, [data-theme="light"] code,
+.light h1, .light h2, .light h3, .light h4, .light h5, .light h6,
+.light p, .light label, .light li, .light a, .light button,
+.light dt, .light dd, .light th, .light td, .light div,
+.light b, .light strong, .light em, .light small, .light code {
+  color: #000000 !important;
 }
 
-.crosshair-corners {
-  position: relative;
+html.light span:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]),
+[data-theme="light"] span:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]),
+.light span:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]) {
+  color: #000000 !important;
 }
-.crosshair-corners::before, .crosshair-corners::after {
-  content: "";
-  position: absolute;
-  width: 10px;
-  height: 10px;
-  border: 1px solid #cbd5e1;
-  pointer-events: none;
+
+/* Light mode utility overrides */
+html.light [class*="text-"]:not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]):not([class*="text-green"]):not([class*="text-red"]),
+[data-theme="light"] [class*="text-"]:not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]):not([class*="text-green"]):not([class*="text-red"]),
+.light [class*="text-"]:not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]):not([class*="text-green"]):not([class*="text-red"]) {
+  color: #000000 !important;
 }
-.crosshair-corners::before {
-  top: -5px;
-  left: -5px;
-  border-right: none;
-  border-bottom: none;
+
+/* Light Mode: Forms must have bg white and text black */
+html.light form,
+[data-theme="light"] form,
+.light form {
+  background-color: #ffffff;
+  color: #000000 !important;
 }
-.crosshair-corners::after {
-  bottom: -5px;
-  right: -5px;
-  border-left: none;
-  border-top: none;
+
+html.light form label,
+[data-theme="light"] form label,
+.light form label {
+  color: #000000 !important;
+}
+
+html.light input,
+html.light textarea,
+html.light select,
+[data-theme="light"] input,
+[data-theme="light"] textarea,
+[data-theme="light"] select,
+.light input,
+.light textarea,
+.light select {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  border-color: #dcdad3 !important;
+}
+
+html.light input::placeholder,
+html.light textarea::placeholder,
+[data-theme="light"] input::placeholder,
+[data-theme="light"] textarea::placeholder,
+.light input::placeholder,
+.light textarea::placeholder {
+  color: #64748b !important;
+}
+
+/* Light Mode: Buttons have bg white (#ffffff) and text black (#000000) */
+html.light button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]),
+[data-theme="light"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]),
+.light button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  border-color: #dcdad3 !important;
+}
+
+html.light button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]):hover,
+[data-theme="light"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]):hover,
+.light button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]):hover {
+  background-color: #f4f4f5 !important;
+  color: #000000 !important;
+  border-color: #b8b6af !important;
+}
+
+html.light button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) span,
+[data-theme="light"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) span,
+.light button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) span {
+  color: #000000 !important;
+}
+
+html.light button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) svg,
+[data-theme="light"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) svg,
+.light button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) svg {
+  stroke: #000000;
+}
+
+/* Dark mode uses consistent soft gray-white text. */
+html.dark, [data-theme="dark"], [data-theme="obsidian"], .dark {
+  color: #e4e4e7 !important;
+}
+
+html.dark body, [data-theme="dark"] body, [data-theme="obsidian"] body, .dark body,
+html.dark h1, html.dark h2, html.dark h3, html.dark h4, html.dark h5, html.dark h6,
+html.dark p, html.dark label, html.dark li, html.dark a, html.dark button,
+html.dark dt, html.dark dd, html.dark th, html.dark td, html.dark div,
+html.dark b, html.dark strong, html.dark em, html.dark small, html.dark code,
+[data-theme="dark"] h1, [data-theme="dark"] h2, [data-theme="dark"] h3, [data-theme="dark"] h4, [data-theme="dark"] h5, [data-theme="dark"] h6,
+[data-theme="dark"] p, [data-theme="dark"] label, [data-theme="dark"] li, [data-theme="dark"] a, [data-theme="dark"] button,
+[data-theme="dark"] dt, [data-theme="dark"] dd, [data-theme="dark"] th, [data-theme="dark"] td, [data-theme="dark"] div,
+[data-theme="dark"] b, [data-theme="dark"] strong, [data-theme="dark"] em, [data-theme="dark"] small, [data-theme="dark"] code,
+.dark h1, .dark h2, .dark h3, .dark h4, .dark h5, .dark h6,
+.dark p, .dark label, .dark li, .dark a, .dark button,
+.dark dt, .dark dd, .dark th, .dark td, .dark div,
+.dark b, .dark strong, .dark em, .dark small, .dark code {
+  color: #e4e4e7 !important;
+}
+
+html.dark span:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]),
+[data-theme="dark"] span:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]),
+.dark span:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]) {
+  color: #e4e4e7 !important;
+}
+
+/* Dark mode utility overrides */
+html.dark [class*="text-"]:not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]):not([class*="text-green"]):not([class*="text-red"]),
+[data-theme="dark"] [class*="text-"]:not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]):not([class*="text-green"]):not([class*="text-red"]),
+[data-theme="obsidian"] [class*="text-"]:not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]):not([class*="text-green"]):not([class*="text-red"]),
+.dark [class*="text-"]:not([class*="text-emerald"]):not([class*="text-rose"]):not([class*="text-cyan"]):not([class*="text-green"]):not([class*="text-red"]) {
+  color: #e4e4e7 !important;
+}
+
+/* Dark mode forms use the shared soft gray-white text color. */
+html.dark form,
+[data-theme="dark"] form,
+[data-theme="obsidian"] form,
+.dark form {
+  background-color: #000000;
+  color: #e4e4e7 !important;
+}
+
+html.dark form label,
+[data-theme="dark"] form label,
+[data-theme="obsidian"] form label,
+.dark form label {
+  color: #e4e4e7 !important;
+}
+
+html.dark input,
+html.dark textarea,
+html.dark select,
+[data-theme="dark"] input,
+[data-theme="dark"] textarea,
+[data-theme="dark"] select,
+[data-theme="obsidian"] input,
+[data-theme="obsidian"] textarea,
+[data-theme="obsidian"] select,
+.dark input,
+.dark textarea,
+.dark select {
+  background-color: #000000 !important;
+  color: #e4e4e7 !important;
+  border-color: rgba(255, 255, 255, 0.20) !important;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder,
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder,
+[data-theme="obsidian"] input::placeholder,
+[data-theme="obsidian"] textarea::placeholder,
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #a1a1aa !important;
+}
+
+/* Dark mode buttons use the shared soft gray-white text color. */
+html.dark button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]),
+[data-theme="dark"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]),
+[data-theme="obsidian"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]),
+.dark button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) {
+  background-color: #000000 !important;
+  color: #e4e4e7 !important;
+  border-color: rgba(255, 255, 255, 0.22) !important;
+}
+
+html.dark button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]):hover,
+[data-theme="dark"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]):hover,
+[data-theme="obsidian"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]):hover,
+.dark button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]):hover {
+  background-color: #111113 !important;
+  color: #e4e4e7 !important;
+  border-color: rgba(255, 255, 255, 0.38) !important;
+}
+
+html.dark button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) span,
+[data-theme="dark"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) span,
+[data-theme="obsidian"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) span,
+.dark button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) span {
+  color: #e4e4e7 !important;
+}
+
+html.dark button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) svg:not([class*="text-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]),
+[data-theme="dark"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) svg:not([class*="text-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]),
+[data-theme="obsidian"] button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) svg:not([class*="text-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]),
+.dark button:not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-cyan"]):not([class*="bg-red"]):not([class*="bg-green"]) svg:not([class*="text-cyan"]):not([class*="text-emerald"]):not([class*="text-rose"]) {
+  stroke: #ffffff;
 }
 
 .glass-panel {
-  background: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(226, 232, 240, 1);
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  background: var(--glass-bg);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--card-shadow);
 }
 
 .glass-panel-glow {
-  background: rgba(255, 255, 255, 0.95);
+  background: var(--glass-bg);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(99, 102, 241, 0.3);
-  box-shadow: 0 10px 25px rgba(79, 70, 229, 0.1);
+  border: 1px solid var(--border-main);
+  box-shadow: 0 10px 30px rgba(255, 255, 255, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.dark-inner-border {
+  border: 1px solid var(--border-main);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+/* White Edge Shine Specular Highlight */
+.white-edge-shine {
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.15), 0 0 25px rgba(255, 255, 255, 0.06);
+}
+
+/* Automatic Darkmode Inner White Shade Highlights */
+html.dark .bg-theme-card,
+[data-theme="dark"] .bg-theme-card,
+.dark .bg-theme-card {
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.10), 0 14px 40px -5px rgba(0, 0, 0, 0.85);
+}
+
+html.dark .border-theme-border,
+[data-theme="dark"] .border-theme-border,
+.dark .border-theme-border {
+  border-color: rgba(255, 255, 255, 0.16);
 }
 
 /* Custom scrollbar */
@@ -67,12 +303,87 @@
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #f8fafc;
+  background: var(--bg-main);
 }
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: var(--border-main);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: var(--text-sub);
+}
+
+/* Artistic animations */
+@keyframes dashFlow {
+  from {
+    stroke-dashoffset: 40;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes spinSlow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes spinReverseSlow {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes circuitPulse {
+  0% {
+    stroke-dashoffset: 120;
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0.3;
+  }
+}
+
+.animated-flow-line {
+  stroke-dasharray: 6 6;
+  animation: dashFlow 2s linear infinite;
+}
+
+.circuit-pulse-line {
+  stroke-dasharray: 40 80;
+  animation: circuitPulse 3s ease-in-out infinite;
+}
+
+.spin-slow {
+  animation: spinSlow 24s linear infinite;
+}
+
+.spin-reverse-slow {
+  animation: spinReverseSlow 32s linear infinite;
+}
+
+.pulse-glow-blue {
+  animation: pulseGlow 3s ease-in-out infinite;
 }

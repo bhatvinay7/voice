@@ -4,8 +4,9 @@ import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { UserProfile } from "../../types/user";
+import { useLogout } from "../lib/api";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bot, Mic, MicOff } from "lucide-react";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface HeaderProps {
   user: UserProfile | null;
@@ -21,6 +22,7 @@ export function Header({
   const pathname = usePathname();
   const router = useRouter();
   const [scrolled, setScrolled] = useState(false);
+  const logoutMutation = useLogout();
 
   useEffect(() => {
     const handleScroll = () => {
@@ -30,8 +32,6 @@ export function Header({
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
-
-
   return (
     <motion.header 
       initial={{ y: -100 }}
@@ -39,43 +39,44 @@ export function Header({
       transition={{ duration: 0.5 }}
       className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${
         scrolled 
-          ? "bg-white/80 backdrop-blur-xl border-b border-slate-200 shadow-sm" 
+          ? "bg-theme-card/90 backdrop-blur-xl border-b border-theme-border dark:border-white/15 shadow-lg dark:shadow-[inset_0_-1px_0_0_rgba(255,255,255,0.1)]" 
           : "bg-transparent border-b border-transparent"
-      } text-slate-800 px-6 py-4 flex items-center justify-between`}
+      } text-theme-text px-6 py-4 flex items-center justify-between`}
     >
       <Link href="/" className="flex items-center space-x-3 cursor-pointer group">
-        <div className="w-10 h-10 rounded-sm bg-slate-900 flex items-center justify-center font-bold text-xl shadow-sm group-hover:scale-105 transition-transform duration-300">
-          <span className="text-white">AE</span>
+        <div className="w-10 h-10 rounded-xl bg-theme-text flex items-center justify-center font-black text-xl shadow-md group-hover:scale-105 transition-transform duration-300 dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.2)]">
+          <span className="text-theme-main">dw</span>
         </div>
         <div>
-          <h1 className="font-extrabold text-lg tracking-wide text-slate-900 type-mono-label">
-            Estate AI
+          <h1 className="font-extrabold text-xl tracking-tight text-theme-text">
+            dwin
           </h1>
-          <p className="text-[10px] text-indigo-600 font-mono tracking-widest uppercase">Autonomous Platform</p>
+          <p className="text-[10px] text-theme-sub font-mono tracking-widest uppercase font-semibold">Real Estate AI</p>
         </div>
       </Link>
 
-      <nav className="hidden md:flex items-center space-x-1 bg-white p-1 rounded-sm border border-slate-200 shadow-sm type-mono-label">
+      <nav className="flex items-center gap-4 sm:gap-6">
         <Link
           href="/"
-          className={`px-5 py-2 text-sm font-bold transition-all duration-300 ${
-            pathname === "/" ? "bg-indigo-50 text-indigo-700 shadow-sm border border-indigo-100" : "text-slate-500 hover:text-slate-900 hover:bg-slate-50"
+          className={`text-xs sm:text-sm transition-all duration-200 ${
+            pathname === "/" ? "text-theme-accent font-extrabold" : "text-theme-sub font-medium hover:text-theme-text"
           }`}
         >
           Home
         </Link>
         <Link
           href="/dashboard"
-          className={`px-5 py-2 text-sm font-bold transition-all duration-300 ${
-            pathname === "/dashboard" ? "bg-indigo-50 text-indigo-700 shadow-sm border border-indigo-100" : "text-slate-500 hover:text-slate-900 hover:bg-slate-50"
+          className={`text-xs sm:text-sm transition-all duration-200 ${
+            pathname === "/dashboard" ? "text-theme-accent font-extrabold" : "text-theme-sub font-medium hover:text-theme-text"
           }`}
         >
           Dashboard
         </Link>
       </nav>
 
-      <div className="flex items-center space-x-4 md:space-x-6">
-
+      <div className="flex items-center space-x-3 sm:space-x-4">
+        {/* Dark / Light Mode Switcher */}
+        <ThemeToggle showLabel={false} />
 
         {/* Auth User Info */}
         <AnimatePresence mode="wait">
@@ -84,17 +85,33 @@ export function Header({
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
-              className="flex items-center space-x-3 bg-slate-100/80 pl-2 pr-4 py-1.5 rounded-full border border-slate-200"
+              className="flex items-center space-x-3 bg-theme-card pl-2 pr-4 py-1.5 rounded-full border border-theme-border dark:border-white/15 shadow-sm dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]"
             >
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 flex items-center justify-center text-xs font-bold text-white shadow-inner">
-                {user.name.charAt(0)}
+              <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center text-xs font-bold text-white shadow-inner dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.2)]">
+                {user.name?.trim().charAt(0).toUpperCase() || "U"}
               </div>
               <div className="text-left hidden sm:block">
-                <p className="text-xs font-semibold text-slate-800 leading-tight">{user.name}</p>
-                <p className="text-[9px] text-emerald-600 font-mono tracking-wider uppercase">
-                  {user.is_verified ? "Verified" : "Unverified"}
+                <p className="text-xs font-bold text-theme-text leading-tight">{user.name}</p>
+                <p className="text-[9px] text-emerald-500 font-mono tracking-wider uppercase font-semibold">
+                  {user.role === "admin" ? "Admin" : (user.is_verified ? "Verified" : "Unverified")}
                 </p>
               </div>
+              {user.role === "admin" && (
+                <button
+                  onClick={() => router.push("/admin")}
+                  className="ml-2 text-[10px] bg-theme-main text-theme-text border border-theme-border dark:border-white/15 px-2.5 py-1 rounded-full shadow-sm hover:bg-theme-card-hover transition font-bold dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]"
+                >
+                  Admin
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  logoutMutation.mutate();
+                }}
+                className="ml-2 text-[10px] text-rose-500 hover:text-rose-600 font-bold uppercase tracking-wider"
+              >
+                Logout
+              </button>
             </motion.div>
           ) : (
             <motion.button
@@ -102,13 +119,13 @@ export function Header({
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
               onClick={() => router.push("/auth")}
-              className="relative inline-flex h-9 items-center justify-center overflow-hidden rounded-full bg-slate-900 px-6 font-medium text-white transition-all hover:bg-slate-800 hover:scale-105 active:scale-95 focus:outline-none focus:ring-2 focus:ring-slate-900/50 shadow-sm"
+              className="relative inline-flex h-9 items-center justify-center overflow-hidden rounded-full bg-theme-text px-6 font-bold text-theme-main transition-all hover:opacity-90 hover:scale-105 active:scale-95 focus:outline-none shadow-sm dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.2)]"
             >
-              <span className="text-xs font-semibold tracking-wide">Sign In</span>
+              <span className="text-xs font-bold tracking-wide">Sign In</span>
             </motion.button>
           )}
         </AnimatePresence>
       </div>
     </motion.header>
   );
-};
+}
