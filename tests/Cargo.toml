@@ -1,0 +1,31 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { workspace = true }
+dotenvy = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+
+orchestrator = { path = "../crates/libs/orchestrator" }
+agent = { path = "../crates/libs/agent" }
+db = { path = "../crates/libs/db" }
+scheduler = { path = "../crates/services/scheduler" }
+pubsub = { path = "../crates/libs/pubsub" }
+rag = { path = "../crates/libs/rag" }
+config = { path = "../crates/libs/config" }
+sled = "0.34.7"
+tonic = { workspace = true }
+livekit = { workspace = true }
+livekit-api = { workspace = true }
+silero-vad-pure = "0.1.1"
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+chrono = { workspace = true }
+
+
