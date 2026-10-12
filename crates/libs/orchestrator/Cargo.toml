@@ -1,0 +1,42 @@
+[package]
+name = "orchestrator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+config = { path = "../config" }
+pubsub = { path = "../pubsub" }
+db = { path = "../db" }
+rag = { path = "../rag" }
+tokio = { workspace = true }
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono = { workspace = true }
+futures-util = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+livekit = { workspace = true }
+livekit-api = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = { workspace = true }
+silero-vad-pure = "0.1.1"
+sled = "0.34.7"
+dashmap = "6.2.1"
+parking_lot = "0.12.5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls-native-roots"] }
+bytes = "1.5"
+scheduler = { version = "0.1.0", path = "../../services/scheduler" }
+prometheus = { workspace = true }
+lazy_static = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing = { workspace = true }
+hmac = "0.12"
+sha2 = "0.10"
+
+[build-dependencies]
+tonic-build = "0.12"
