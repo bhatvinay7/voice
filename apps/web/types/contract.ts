@@ -5,8 +5,10 @@ export interface TenancyContract {
   landlord_name: string;
   tenant_name: string;
   property_address: string;
-  annual_rent: number;
-  security_deposit: number;
+  annual_rent?: number;
+  annual_rent_aed?: number;
+  security_deposit?: number;
+  security_deposit_aed?: number;
   cheques_count: number;
   notice_period_days: number;
   confidence_score: number;
@@ -15,3 +17,4 @@ export interface TenancyContract {
   clause_summary: string;
   created_at: string;
 }
+
