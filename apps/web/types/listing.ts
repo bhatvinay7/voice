@@ -4,10 +4,11 @@ export interface PropertyListing {
   secondary_title: string;
   description: string;
   secondary_description: string;
-  city: "Dubai" | "Abu Dhabi";
+  city: string;
   location: string;
-  price: number;
-  listing_type: "rent" | "buy";
+  price?: number;
+  price_aed?: number;
+  listing_type: "rent" | "buy" | string;
   bedrooms: number;
   bathrooms: number;
   area_sqft: number;

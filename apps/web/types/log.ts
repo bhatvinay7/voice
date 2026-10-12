@@ -9,12 +9,15 @@ export interface StreamEventRecord {
 
 export interface CallSummaryRecord {
   call_id: string;
-  user_id: string;
-  duration_seconds: number;
-  r2_transcript_path: string;
-  r2_audio_path: string;
-  summary: string;
-  qualified_budget: number;
-  preferred_location: string;
+  user_id?: string;
+  duration_seconds?: number;
+  r2_transcript_path?: string;
+  r2_audio_path?: string;
+  text_presigned_url?: string;
+  audio_presigned_url?: string;
+  summary?: string;
+  qualified_budget?: number;
+  qualified_budget_aed?: number;
+  preferred_location?: string;
   created_at: string;
 }

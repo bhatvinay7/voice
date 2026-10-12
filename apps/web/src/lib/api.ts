@@ -5,6 +5,7 @@ import { BookingResponse } from "../../types/booking";
 import { TenancyContract } from "../../types/contract";
 import { AdminGraphNode } from "../../types/graph";
 import { StreamEventRecord, CallSummaryRecord } from "../../types/log";
+import { AdminSessionDetailsResponse } from "../../types/admin";
 
 const API_BASE = "/api";
 
@@ -19,7 +20,8 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
     ...options,
   });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    const errorBody = await res.json().catch(() => null) as { error?: string; message?: string } | null;
+    throw new Error(errorBody?.error || errorBody?.message || `HTTP ${res.status}: ${res.statusText}`);
   }
   return res.json() as Promise<T>;
 }
@@ -66,6 +68,7 @@ export function useBookViewingSlot() {
       userId: string;
       slotTime: string;
       idempotencyKey: string;
+      sessionId?: string;
     }) =>
       fetchJson<BookingResponse>("/bookings", {
         method: "POST",
@@ -74,6 +77,7 @@ export function useBookViewingSlot() {
           user_id: params.userId,
           slot_time: params.slotTime,
           idempotency_key: params.idempotencyKey,
+          ...(params.sessionId ? { session_id: params.sessionId } : {}),
         }),
       }),
     onSuccess: () => {
@@ -165,13 +169,14 @@ export function useAdminCallSummaries() {
   return useQuery({
     queryKey: ["admin", "callSummaries"],
     queryFn: () => fetchJson<{ success: boolean; summaries: CallSummaryRecord[] }>("/admin/call-summaries"),
+    refetchInterval: 5000,
   });
 }
 
 export function useAdminSessionDetails(sessionId: string) {
   return useQuery({
     queryKey: ["admin", "session", sessionId],
-    queryFn: () => fetchJson<any>(`/admin/sessions/${sessionId}`),
+    queryFn: () => fetchJson<AdminSessionDetailsResponse>(`/admin/sessions/${sessionId}`),
     enabled: !!sessionId,
   });
 }
@@ -190,22 +195,99 @@ export function useAdminAddListing() {
   });
 }
 
-export function useGoogleLogin() {
+export function useAdminUpdateListing() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (params: { idToken: string; email: string; name: string }) =>
-      fetchJson<{ success: boolean; token: string; user: UserProfile }>("/auth/google", {
+    mutationFn: (params: { id: string; listing: PropertyListing }) =>
+      fetchJson<{ success: boolean; listing: PropertyListing }>(`/admin/listings/${params.id}`, {
+        method: "PUT",
+        body: JSON.stringify(params.listing),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["listings"] });
+    },
+  });
+}
+
+export function useAdminDeleteListing() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      fetchJson<{ success: boolean }>(`/admin/listings/${id}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["listings"] });
+    },
+  });
+}
+
+export function useAdminLogin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { email: string; password: string }) =>
+      fetchJson<{ success: boolean; token: string; user: UserProfile }>("/admin/login", {
         method: "POST",
-        body: JSON.stringify({
-          id_token: params.idToken,
-          email: params.email,
-          name: params.name,
-        }),
+        body: JSON.stringify(params),
       }),
     onSuccess: (data) => {
       if (typeof window !== "undefined" && data.token) {
         localStorage.setItem("auth_token", data.token);
       }
+      queryClient.setQueryData(["user", "me"], { success: true, user: data.user });
+      queryClient.invalidateQueries({ queryKey: ["user", "me"] });
+    },
+  });
+}
+
+export function useEmailLogin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { email: string; password: string; name?: string }) =>
+      fetchJson<{ success: boolean; token: string; user: UserProfile }>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify(params),
+      }),
+    onSuccess: (data) => {
+      if (typeof window !== "undefined" && data.token) {
+        localStorage.setItem("auth_token", data.token);
+      }
+      queryClient.setQueryData(["user", "me"], { success: true, user: data.user });
+      queryClient.invalidateQueries({ queryKey: ["user", "me"] });
+    },
+  });
+}
+
+export function useGoogleLogin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { idToken: string }) =>
+      fetchJson<{ success: boolean; token: string; user: UserProfile }>("/auth/google", {
+        method: "POST",
+        body: JSON.stringify({ id_token: params.idToken }),
+      }),
+    onSuccess: (data) => {
+      if (typeof window !== "undefined" && data.token) {
+        localStorage.setItem("auth_token", data.token);
+      }
+      queryClient.setQueryData(["user", "me"], { success: true, user: data.user });
+      queryClient.invalidateQueries({ queryKey: ["user", "me"] });
+    },
+  });
+}
+
+export function useLogout() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      fetchJson<{ success: boolean; message: string }>("/auth/logout", {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("auth_token");
+      }
+      queryClient.setQueryData(["user", "me"], { success: true, user: null });
       queryClient.invalidateQueries({ queryKey: ["user", "me"] });
     },
   });
