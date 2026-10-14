@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], grpc_port));
     let http_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], http_port));
     
-    let state = SchedulerState::new();
+    let state = SchedulerState::new()?;
     let service = CellControlService { state: state.clone() };
 
     let app = Router::new().route("/metrics", get(metrics_handler));

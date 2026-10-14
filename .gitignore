@@ -59,4 +59,8 @@ crates/services/server/webrtc/
 # Explicitly excluded from this repository
 .github/
 seed.js
-voice-k8s/
+voice-k8s/logs/exit.txt
+
+# Local generated files
+exit
+logs/exit.txt

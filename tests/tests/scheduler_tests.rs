@@ -3,7 +3,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn test_scheduler_cell_registration_and_scaling() {
-    let state = SchedulerState::new();
+    let state = SchedulerState::new().unwrap();
 
     state.register_cell(CellState {
         cell_id: "cell-1".to_string(),
@@ -23,7 +23,7 @@ async fn test_scheduler_cell_registration_and_scaling() {
 
 #[tokio::test]
 async fn test_slot_acquire_and_routing_check() {
-    let state = SchedulerState::new();
+    let state = SchedulerState::new().unwrap();
 
     state.register_cell(CellState {
         cell_id: "cell-1".to_string(),
@@ -43,7 +43,7 @@ async fn test_slot_acquire_and_routing_check() {
 
 #[tokio::test]
 async fn test_slot_release_and_call_cancellation() {
-    let state = SchedulerState::new();
+    let state = SchedulerState::new().unwrap();
 
     state.register_cell(CellState {
         cell_id: "cell-1".to_string(),
@@ -65,7 +65,7 @@ async fn test_slot_release_and_call_cancellation() {
 
 #[tokio::test]
 async fn test_cell_heartbeat_check() {
-    let state = SchedulerState::new();
+    let state = SchedulerState::new().unwrap();
 
     state.register_cell(CellState {
         cell_id: "cell-1".to_string(),
@@ -114,7 +114,7 @@ async fn test_grpc_connection_to_scheduler_check() {
     use scheduler::grpc::cell_control_server::CellControlServer;
     use tonic::transport::Server;
 
-    let state = SchedulerState::new();
+    let state = SchedulerState::new().unwrap();
     let service = CellControlService { state };
 
     let addr = "[::1]:50059".parse().unwrap();

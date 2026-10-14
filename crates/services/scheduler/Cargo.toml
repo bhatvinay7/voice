@@ -9,6 +9,12 @@ tonic = { workspace = true }
 prost = { workspace = true }
 futures-util = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+bincode = { workspace = true }
+sled = "0.34.7"
 dashmap = "6.2"
 crossbeam-utils = "0.8"
 prometheus = { workspace = true }
@@ -23,7 +29,6 @@ tracing-subscriber = { workspace = true }
 db = { path = "../../libs/db" }
 rag = { path = "../../libs/rag" }
 config = { path = "../../libs/config" }
-serde_json = { workspace = true }
 dotenvy = { workspace = true }
 [build-dependencies]
 tonic-build = "0.12"

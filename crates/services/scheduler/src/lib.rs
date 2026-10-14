@@ -40,7 +40,7 @@ use tokio_util::time::delay_queue;
 use delay_queue::Key as DelayKey;
 use tokio::task::JoinHandle;
 use std::panic::AssertUnwindSafe;
-use futures::FutureExt;
+use futures_util::{FutureExt, StreamExt};
 use tokio::time::sleep as tokio_sleep;
 use std::time::Duration as StdDuration;
 
@@ -96,7 +96,12 @@ pub struct SchedulerState {
 }
 
 impl SchedulerState {
-    pub fn new(db: Db) -> Self {
+    pub fn new() -> Result<Self, sled::Error> {
+        let db = sled::Config::new().temporary(true).open()?;
+        Ok(Self::new_with_db(db))
+    }
+
+    pub fn new_with_db(db: Db) -> Self {
         Self {
             db: Arc::new(db),
             cells: Arc::new(CachePadded::new(DashMap::new())),
