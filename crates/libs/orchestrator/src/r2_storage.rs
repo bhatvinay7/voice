@@ -7,6 +7,14 @@ type HmacSha256 = Hmac<Sha256>;
 
 const MAX_PACKET_GAP_SAMPLES: usize = 16_000 / 50;
 
+fn r2_origin_url(cfg: &AppConfig) -> String {
+    if cfg.r2_endpoint_url.contains(".r2.cloudflarestorage.com") {
+        cfg.r2_endpoint_url.trim_end_matches('/').to_string()
+    } else {
+        format!("https://{}.r2.cloudflarestorage.com", cfg.r2_account_id)
+    }
+}
+
 pub fn build_conversation_wav(chunks: &mut [S3DumpData]) -> Result<Vec<u8>, String> {
     let mut user_track = Vec::new();
     let mut assistant_track = Vec::new();
@@ -173,15 +181,12 @@ pub async fn upload_conversation(
         return Err("Call ID cannot be used as an R2 object key".to_string());
     }
 
-    let origin = if cfg.r2_endpoint_url.contains(".r2.cloudflarestorage.com") {
-        cfg.r2_endpoint_url.trim_end_matches('/').to_string()
-    } else {
-        format!("https://{}.r2.cloudflarestorage.com", cfg.r2_account_id)
-    };
+    let origin = r2_origin_url(cfg);
     let object_key = format!("calls/{}/conversation.wav", call_key);
     let encoded_key = percent_encode(object_key.as_bytes(), true);
     let encoded_bucket = percent_encode(cfg.r2_bucket_name.as_bytes(), false);
     let url = format!("{}/{}/{}", origin, encoded_bucket, encoded_key);
+
     let parsed_url =
         reqwest::Url::parse(&url).map_err(|error| format!("Invalid R2 endpoint URL: {}", error))?;
     let host = parsed_url
@@ -191,6 +196,7 @@ pub async fn upload_conversation(
         Some(port) => format!("{}:{}", host, port),
         None => host.to_string(),
     };
+
     let now = chrono::Utc::now();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = now.format("%Y%m%d").to_string();
@@ -203,7 +209,10 @@ pub async fn upload_conversation(
     );
     let canonical_request = format!(
         "PUT\n{}\n\n{}\n{}\n{}",
-        canonical_uri, canonical_headers, signed_headers, payload_hash
+        canonical_uri,
+        canonical_headers,
+        signed_headers,
+        payload_hash
     );
     let scope = format!("{}/auto/s3/aws4_request", date_stamp);
     let string_to_sign = format!(
@@ -265,11 +274,7 @@ pub fn presign_conversation_url(cfg: &AppConfig, session_id: &str) -> Result<Str
     if call_key.is_empty() {
         return Err("Call ID cannot be used as an R2 object key".to_string());
     }
-    let origin = if cfg.r2_endpoint_url.contains(".r2.cloudflarestorage.com") {
-        cfg.r2_endpoint_url.trim_end_matches('/').to_string()
-    } else {
-        format!("https://{}.r2.cloudflarestorage.com", cfg.r2_account_id)
-    };
+    let origin = r2_origin_url(cfg);
     let encoded_bucket = percent_encode(cfg.r2_bucket_name.as_bytes(), false);
     let object_key = format!("calls/{}/conversation.wav", call_key);
     let encoded_key = percent_encode(object_key.as_bytes(), true);
