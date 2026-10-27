@@ -151,6 +151,16 @@ pub enum AudioSpeaker {
     Assistant,
 }
 
+#[derive(Debug, Clone)]
+pub struct TtsAudioPacket {
+    pub session_id: String,
+    pub samples: Vec<i16>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub elapsed_samples: u64,
+    pub speaker: AudioSpeaker,
+}
+
 pub enum S3DumpData {
     Text {
         session_id: String,
