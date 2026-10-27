@@ -1,10 +1,38 @@
-use crate::models::{S3DumpData, StsPipelineCmd, StsPipelineEvent, WebRtcAudioChunk};
+use crate::models::{S3DumpData, TtsAudioPacket};
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 const WAV_OUTPUT_BYTES_PER_SECOND: u64 = 16_000 * 2 * 2;
+
+pub async fn run_tts_audio_packet_pipeline(
+    session_id: String,
+    mut rx: mpsc::Receiver<TtsAudioPacket>,
+) {
+    loop {
+        let fut = AssertUnwindSafe(async {
+            while let Some(packet) = rx.recv().await {
+                info!(
+                    "[TTS Packet Supervisor {}] Received {} PCM samples ({}Hz, {}ch)",
+                    session_id,
+                    packet.samples.len(),
+                    packet.sample_rate,
+                    packet.channels
+                );
+            }
+        });
+
+        if let Err(panic_error) = fut.catch_unwind().await {
+            error!(
+                "TTS packet supervisor for session {} panicked; recovering channel worker: {:?}",
+                session_id, panic_error
+            );
+        } else {
+            break;
+        }
+    }
+}
 
 pub async fn run_sts_pipeline(
     session_id: String,
@@ -22,16 +50,13 @@ pub async fn run_sts_pipeline(
                             text
                         );
 
-                        // Simulate STS text -> audio generation
-                        // 1. Send live audio directly to WebRTC
                         let _ = webrtc_tx
                             .send(WebRtcAudioChunk {
                                 session_id: session_id.clone(),
-                                pcm_bytes: vec![0, 1, 2, 3], // Dummy PCM bytes
+                                pcm_bytes: vec![0, 1, 2, 3],
                             })
                             .await;
 
-                        // 2. Send transcript events to Decision Engine
                         let _ = event_tx
                             .send(StsPipelineEvent::AiTranscriptChunk {
                                 text: "Simulated speech transcript".to_string(),
@@ -116,7 +141,10 @@ pub async fn run_s3_dump_pipeline(session_id: String, mut rx: mpsc::Receiver<S3D
                             audio_chunks.push(audio);
                         } else if !recording_limit_reached {
                             recording_limit_reached = true;
-                            warn!("Recording buffer limit reached for session {} ({} bytes); dropping subsequent recording frames while keeping the live session unaffected.", session_id, max_audio_bytes);
+                            warn!(
+                                "Recording buffer limit reached for session {} ({} bytes); dropping subsequent recording frames while keeping the live session unaffected.",
+                                session_id, max_audio_bytes
+                            );
                         }
                     }
                     S3DumpData::Finalize {

@@ -15,6 +15,7 @@ pub struct SessionActor {
     pub agent_tx: Option<mpsc::Sender<AgentCmd>>,
     pub sts_tx: Option<mpsc::Sender<StsPipelineCmd>>,
     pub s3_dump_tx: Option<mpsc::Sender<S3DumpData>>,
+    pub tts_audio_tx: Option<mpsc::Sender<TtsAudioPacket>>,
     pub audio_broadcast_tx: tokio::sync::broadcast::Sender<(String, Vec<u8>)>,
     pub ai_listen_muted: bool,
     pub last_user_transcript: Option<(String, std::time::Instant)>,
@@ -26,12 +27,17 @@ impl SessionActor {
     pub fn new(session_id: String, orch: Orchestrator) -> Self {
         let run_id = RunId(format!("run-{}", session_id));
         let agent_tx = (orch.agent_factory)(run_id.clone(), orch.queue_tx.clone());
-        // Audio frames arrive roughly every 10–20 ms. Keep enough queued audio to
-        // absorb short upload/CPU spikes and reduce dropped WAV frames.
+
         let (s3_tx, s3_rx) = mpsc::channel(1_000);
         let s_id = session_id.clone();
         tokio::spawn(async move {
             crate::supervisors::run_s3_dump_pipeline(s_id, s3_rx).await;
+        });
+
+        let (tts_audio_tx, tts_audio_rx) = mpsc::channel(256);
+        let tts_session_id = session_id.clone();
+        tokio::spawn(async move {
+            crate::supervisors::run_tts_audio_packet_pipeline(tts_session_id, tts_audio_rx).await;
         });
 
         let (audio_broadcast_tx, mut tone_rx) =
@@ -39,28 +45,22 @@ impl SessionActor {
         let agent_tx_clone = agent_tx.clone();
         let r_id = run_id.clone();
 
-        // Parallel Tone Analysis Pipeline (N requests)
         tokio::spawn(async move {
             let mut chunk_count = 0;
-            // Note: In production we load config once, e.g. let cfg = AppConfig::load();
             let cfg =
                 config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
             let tone_api_key = cfg.tone_model_api_key.clone();
 
             while let Ok((sess_id, _audio_chunk)) = tone_rx.recv().await {
                 chunk_count += 1;
-                // Wait for enough audio to analyze the tone...
                 if chunk_count % 5 == 0 {
                     let agent_tx_inner = agent_tx_clone.clone();
                     let rid_inner = r_id.clone();
                     let _api_key = tone_api_key.clone();
                     let s_id = sess_id.clone();
 
-                    // Spawn a dedicated parallel task for THIS tone request
                     tokio::spawn(async move {
                         let fut = std::panic::AssertUnwindSafe(async {
-                            // Simulate API Call using _api_key
-                            // let tone = call_tone_api(_api_key, s_id, _audio_chunk).await;
                             let _ = agent_tx_inner
                                 .send(AgentCmd::InjectToneContext {
                                     run_id: rid_inner.clone(),
@@ -111,12 +111,23 @@ impl SessionActor {
             agent_tx: Some(agent_tx),
             sts_tx: Some(sts_worker.get_cmd_tx()),
             s3_dump_tx: Some(s3_tx),
+            tts_audio_tx: Some(tts_audio_tx),
             audio_broadcast_tx,
             ai_listen_muted: false,
             last_user_transcript: None,
             cancel_token: CancellationToken::new(),
             orch,
         }
+    }
+
+    pub async fn enqueue_tts_audio_packet(
+        &self,
+        packet: TtsAudioPacket,
+    ) -> Result<(), mpsc::error::SendError<TtsAudioPacket>> {
+        if let Some(tx) = &self.tts_audio_tx {
+            tx.send(packet).await?;
+        }
+        Ok(())
     }
 
     pub async fn run(mut self, mut rx: mpsc::Receiver<SessionEvent>) {
