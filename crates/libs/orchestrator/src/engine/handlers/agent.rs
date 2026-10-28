@@ -90,19 +90,23 @@ impl SessionActor {
 
                 let fallback_text = "I apologize, but I had trouble processing that request. Please let me know how I can assist you with luxury apartments, viewing slots, or tenancy contracts in the UAE.".to_string();
 
-                let _ = self.orch.pubsub.publish(SystemEvent::AuditEvent {
-                    call_id: Some(run_id.call_id().to_string()),
-                    event_type: "SYSTEM_ERROR".to_string(),
-                    payload: json!({ "error": error, "action": "decision_maker_fallback" }),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                });
+                // A phone session has a provider media transport. Do not leak
+                // its fallback speech or call data to browser subscribers.
+                if !run_id.call_id().starts_with("phone:") {
+                    let _ = self.orch.pubsub.publish(SystemEvent::AuditEvent {
+                        call_id: Some(run_id.call_id().to_string()),
+                        event_type: "SYSTEM_ERROR".to_string(),
+                        payload: json!({ "error": error, "action": "decision_maker_fallback" }),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    });
 
-                let _ = self.orch.pubsub.publish(SystemEvent::VoiceTtsStream {
-                    call_id: run_id.call_id().to_string(),
-                    audio_chunk_base64: fallback_text.clone(),
-                    index: 0,
-                    is_end: true,
-                });
+                    let _ = self.orch.pubsub.publish(SystemEvent::VoiceTtsStream {
+                        call_id: run_id.call_id().to_string(),
+                        audio_chunk_base64: fallback_text.clone(),
+                        index: 0,
+                        is_end: true,
+                    });
+                }
 
                 if let Some(sts_tx) = &self.sts_tx {
                     let _ = sts_tx

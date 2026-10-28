@@ -22,6 +22,8 @@ pub struct CellChannels {
 }
 
 pub struct Orchestrator {
+    pub slots: crate::slots::Slots,
+    pub phone_media: crate::phone_media::PhoneMediaRegistry,
     pub timer_wheel: Arc<SyncMutex<TimerWheel>>,
     pub session_inboxes: Arc<DashMap<String, mpsc::Sender<SessionEvent>>>,
     pub task_to_session: Arc<DashMap<TaskId, String>>,
@@ -38,6 +40,8 @@ pub struct Orchestrator {
 impl Clone for Orchestrator {
     fn clone(&self) -> Self {
         Self {
+            slots: self.slots.clone(),
+            phone_media: self.phone_media.clone(),
             timer_wheel: self.timer_wheel.clone(),
             session_inboxes: self.session_inboxes.clone(),
             task_to_session: self.task_to_session.clone(),
@@ -89,6 +93,8 @@ impl Orchestrator {
         }
 
         Self {
+            slots: crate::slots::Slots::new(&local_db, std::env::var("MAX_SLOTS_PER_CELL").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(20)).expect("open cell slot store"),
+            phone_media: crate::phone_media::PhoneMediaRegistry::default(),
             timer_wheel: Arc::new(SyncMutex::new(timers)),
             session_inboxes: Arc::new(DashMap::new()),
             task_to_session: Arc::new(DashMap::new()),
@@ -106,6 +112,9 @@ impl Orchestrator {
         protected_rx: ProtectedReceiver<QueueEvent>,
         mut orch: Orchestrator,
     ) {
+        let reaper_slots = orch.slots.clone();
+        let reaper_queue = orch.queue_tx.clone();
+        tokio::spawn(async move { reaper_slots.run_reaper(reaper_queue).await; });
         loop {
             let fut = AssertUnwindSafe(async {
                 let mut rx = protected_rx.lock().await;
@@ -173,6 +182,7 @@ impl Orchestrator {
             QueueEvent::SessionResumed { session_id } => Some(session_id.clone()),
             QueueEvent::SessionCancelled { session_id } => Some(session_id.clone()),
             QueueEvent::UserAudioChunk { session_id, .. } => Some(session_id.clone()),
+            QueueEvent::TelephonyAudio { session_id, .. } => Some(session_id.clone()),
             QueueEvent::SttTranscript { session_id, .. } => Some(session_id.clone()),
             QueueEvent::InterviewerSpeech { session_id, .. } => Some(session_id.clone()),
             QueueEvent::BargeInTrigger { session_id, .. } => Some(session_id.clone()),
@@ -200,14 +210,30 @@ impl Orchestrator {
         };
 
         if let Some(sid) = session_id {
+            if matches!(&event, QueueEvent::UserAudioChunk { .. } | QueueEvent::TelephonyAudio { .. } | QueueEvent::SttTranscript { .. } | QueueEvent::StsEvent { .. }) {
+                let _ = self.slots.touch(&sid, chrono::Utc::now().timestamp());
+            }
             let mut is_new = false;
             if let QueueEvent::SessionStarted { .. } = &event {
+                if self.session_inboxes.contains_key(&sid) { return; }
+                if let Err(error) = self.slots.acquire(&sid, chrono::Utc::now().timestamp()) {
+                    tracing::warn!(%sid, %error, "cell admission rejected");
+                    self.phone_media.close(&sid);
+                    return;
+                }
                 let (tx, rx) = mpsc::channel(100);
                 self.session_inboxes.insert(sid.clone(), tx);
 
                 let session_actor = SessionActor::new(sid.clone(), self.clone());
+                let cleanup = self.clone();
+                let cleanup_id = sid.clone();
                 tokio::spawn(async move {
-                    session_actor.run(rx).await;
+                    if AssertUnwindSafe(session_actor.run(rx)).catch_unwind().await.is_err() {
+                        cleanup.phone_media.close(&cleanup_id);
+                        cleanup.session_inboxes.remove(&cleanup_id);
+                        let _ = cleanup.local_db.remove(format!("session:{}", cleanup_id));
+                    }
+                    let _ = cleanup.slots.release(&cleanup_id);
                 });
                 is_new = true;
                 let _ = self
@@ -216,9 +242,20 @@ impl Orchestrator {
                 let _ = self.local_db.flush();
             }
 
-            if let Some(tx) = self.session_inboxes.get(&sid) {
-                let _ = tx.send(event.clone()).await;
+            let inbox = self.session_inboxes.get(&sid).map(|entry| entry.value().clone());
+            if let Some(tx) = inbox {
+                // Never hold a DashMap guard across await or let a stuck session
+                // block dispatch for every other call in the cell.
+                if tokio::time::timeout(Duration::from_secs(1), tx.send(event.clone())).await.is_err() {
+                    tracing::warn!(%sid, "session inbox backpressure; event dropped");
+                }
             } else if !is_new {
+                if matches!(&event, QueueEvent::SessionCancelled { .. }) {
+                    self.phone_media.close(&sid);
+                    let _ = self.slots.release(&sid);
+                    let _ = self.local_db.remove(format!("session:{}", sid));
+                    return;
+                }
                 // Check Sled persistent store or active call- prefix for graceful session recovery
                 let is_persisted = match self.local_db.get(format!("session:{}", sid).as_bytes()) {
                     Ok(Some(_)) => true,
@@ -228,13 +265,19 @@ impl Orchestrator {
                     }
                 };
 
-                if is_persisted {
+                if is_persisted && !matches!(&event, QueueEvent::SessionCancelled { .. }) {
+                    if self.slots.acquire(&sid, chrono::Utc::now().timestamp()).is_err() { return; }
                     let (tx, rx) = mpsc::channel(100);
                     self.session_inboxes.insert(sid.clone(), tx.clone());
 
                     let session_actor = SessionActor::new(sid.clone(), self.clone());
+                    let cleanup = self.clone();
+                    let cleanup_id = sid.clone();
                     tokio::spawn(async move {
-                        session_actor.run(rx).await;
+                        let _ = AssertUnwindSafe(session_actor.run(rx)).catch_unwind().await;
+                        cleanup.phone_media.close(&cleanup_id);
+                        cleanup.session_inboxes.remove(&cleanup_id);
+                        let _ = cleanup.slots.release(&cleanup_id);
                     });
 
                     let _ = tx.send(event.clone()).await;

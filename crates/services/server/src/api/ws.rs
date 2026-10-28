@@ -36,6 +36,7 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
             // Try to parse the structured JSON message first
             match serde_json::from_str::<WsClientMessage>(&text) {
                 Ok(client_msg) => {
+                    if client_msg.session_id.starts_with("phone:") { continue; }
                     let session_id = client_msg.session_id.clone();
                     let lang = client_msg.language.unwrap_or_else(|| "en".to_string());
 

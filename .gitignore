@@ -57,10 +57,12 @@ target/
 crates/services/server/webrtc/
 
 # Explicitly excluded from this repository
-.github/
 seed.js
 voice-k8s/logs/exit.txt
 
 # Local generated files
 exit
 logs/exit.txt
+
+# Track the documented template only; keep real environment files ignored.
+!/.env.example

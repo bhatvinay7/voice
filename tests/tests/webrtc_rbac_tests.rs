@@ -107,7 +107,11 @@ async fn test_webrtc_mic_audio_data_sending_and_forwarding() {
 
     let s3_send_res = s3_dump_tx.send(orchestrator::S3DumpData::Audio {
         session_id: session_id.clone(),
-        pcm_bytes: pcm_bytes.clone(),
+        samples: pcm_bytes.chunks_exact(2).map(|pair| i16::from_le_bytes([pair[0], pair[1]])).collect(),
+        sample_rate: 16_000,
+        channels: 1,
+        elapsed_samples: 0,
+        speaker: orchestrator::AudioSpeaker::User,
     }).await;
     assert!(s3_send_res.is_ok(), "Mic audio chunk should be forwarded to S3 dump channel");
 

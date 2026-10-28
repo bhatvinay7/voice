@@ -1,5 +1,5 @@
 use agent::LlmAgentActor;
-use config::AppConfig;
+use config::{AppConfig, TelephonyProvider};
 use db::{AdminGraphNode, DatabaseStore};
 use orchestrator::{AgentCmd, AgentEvent, Orchestrator, ProtectedReceiver, QueueEvent, RunId, TaskId, TaskStatus, ToolEvent};
 use pubsub::create_shared_bus;
@@ -13,6 +13,16 @@ async fn test_config_loader() {
     assert_eq!(cfg.port, 4000);
     assert_eq!(cfg.stt_provider, "openai");
     assert_eq!(cfg.r2_bucket_name, "uae-estate-vault");
+}
+
+#[test]
+fn test_telephony_provider_selection_accepts_supported_env_values() {
+    for value in ["twilio", "telnyx", "vonage", "plivo", "sip", "custom"] {
+        let provider = TelephonyProvider::parse(value)
+            .unwrap_or_else(|error| panic!("{value} should be supported: {error}"));
+        assert_eq!(provider.as_str(), value);
+    }
+    assert!(TelephonyProvider::parse("unknown-provider").is_err());
 }
 
 #[tokio::test]
@@ -76,7 +86,7 @@ async fn test_r2_transcript_dump_and_call_summary() {
         "Caller interested in 2BR Marina apartment under 120k AED. Viewing reserved.",
         120000,
         "Dubai Marina",
-    );
+    ).await.expect("save call summary");
 
     assert_eq!(summary_record.call_id, "call-101");
     assert_eq!(summary_record.qualified_budget_aed, 120000);

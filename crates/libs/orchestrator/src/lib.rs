@@ -19,3 +19,9 @@ pub use stt_pipeline::*;
 pub use supervisors::*;
 pub use tts_pipeline::*;
 pub use tts_playback::*;
+
+pub mod phone_media;
+pub mod telephony_audio;
+mod phone_pipeline;
+
+pub mod slots;

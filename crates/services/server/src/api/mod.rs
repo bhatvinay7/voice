@@ -16,6 +16,7 @@ pub mod calls;
 pub mod ws;
 pub mod rbac;
 pub mod agent;
+pub mod telephony;
 
 #[allow(unused_imports)]
 pub use rbac::{AdminUser, AuthUser};
@@ -53,6 +54,12 @@ pub fn api_routes() -> Router<AppState> {
         .route("/api/agent/chat", post(agent::agent_chat_handler))
         .route("/api/agent/config", get(agent::agent_get_config_handler))
         .route("/api/agent/models/check", get(agent::agent_verify_models_handler))
+
+        // Phone-provider callbacks are isolated from browser WebRTC routes.
+        .route("/api/telephony/status", get(telephony::status_handler))
+        .route("/api/telephony/{provider}/incoming", post(telephony::inbound_handler))
+        .route("/api/telephony/{provider}/media/{call_id}", get(telephony::media_handler))
+        .route("/api/telephony/{provider}/media/{call_id}/{token}", get(telephony::media_handler))
 
         // Listings & Search
         .route("/api/listings", get(listings::get_listings))

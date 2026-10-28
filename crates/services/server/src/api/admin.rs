@@ -161,7 +161,10 @@ pub async fn admin_get_logs(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     match state.db.load_recent_stream_events().await {
-        Ok(events) => Json(json!({ "success": true, "logs": events })).into_response(),
+        Ok(events) => {
+            let events: Vec<_> = events.into_iter().filter(|event| !event.session_id.starts_with("phone:")).collect();
+            Json(json!({ "success": true, "logs": events })).into_response()
+        },
         Err(error) => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "success": false, "error": error })),
@@ -196,6 +199,7 @@ pub async fn admin_get_call_summaries(
     };
     let enriched: Vec<serde_json::Value> = recordings
         .iter()
+        .filter(|record| !record.session_id.starts_with("phone:"))
         .map(|record| {
             let summary = summaries.iter().find(|summary| summary.call_id == record.session_id);
             let created_at_readable = chrono::DateTime::parse_from_rfc3339(&record.created_at)
@@ -225,6 +229,7 @@ pub async fn admin_get_session_details(
     State(state): State<AppState>,
     axum::extract::Path(session_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    if session_id.starts_with("phone:") { return super::calls::phone_route_denied(); }
     let summary = match state.db.load_call_summary(&session_id).await {
         Ok(summary) => summary,
         Err(error) => {

@@ -83,11 +83,16 @@ impl SessionActor {
         });
 
         let (sts_event_tx, mut sts_event_rx) = mpsc::channel(100);
-        let sts_worker = crate::sts_pipe::StsPipelineWorker::spawn(
-            session_id.clone(),
-            sts_event_tx,
-            s3_tx.clone(),
-        );
+        let sts_tx = if session_id.starts_with("phone:") {
+            // Phone calls never join the browser's LiveKit room.
+            orch.phone_media.sender(&session_id).map(|output| {
+                crate::phone_pipeline::spawn(session_id.clone(), sts_event_tx, s3_tx.clone(), output)
+            })
+        } else {
+            Some(crate::sts_pipe::StsPipelineWorker::spawn(
+                session_id.clone(), sts_event_tx, s3_tx.clone(),
+            ).get_cmd_tx())
+        };
 
         let q_tx_inner = orch.queue_tx.clone();
         let session_id_clone = session_id.clone();
@@ -109,7 +114,7 @@ impl SessionActor {
             db_tasks: HashMap::new(),
             workflow_graph: None,
             agent_tx: Some(agent_tx),
-            sts_tx: Some(sts_worker.get_cmd_tx()),
+            sts_tx,
             s3_dump_tx: Some(s3_tx),
             tts_audio_tx: Some(tts_audio_tx),
             audio_broadcast_tx,
@@ -145,6 +150,7 @@ impl SessionActor {
             }
         }
 
+        self.orch.phone_media.close(&self.session_id);
         self.orch.session_inboxes.remove(&self.session_id);
         let _ = self
             .orch
@@ -359,6 +365,19 @@ impl SessionActor {
                         .await;
                 });
             }
+        }
+    }
+}
+impl Drop for SessionActor {
+    fn drop(&mut self) {
+        // Also runs when the session future unwinds or is aborted.
+        self.cancel_token.cancel();
+        self.orch.phone_media.close(&self.session_id);
+        if let Some(tx) = &self.agent_tx {
+            let _ = tx.try_send(AgentCmd::Cancel { run_id: self.run_id.clone() });
+        }
+        if let Some(tx) = &self.sts_tx {
+            let _ = tx.try_send(StsPipelineCmd::Shutdown);
         }
     }
 }

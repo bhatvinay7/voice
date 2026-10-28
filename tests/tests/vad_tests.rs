@@ -20,7 +20,8 @@ async fn test_sts_pipeline_vad_turn_switching() {
     let (event_tx, mut _event_rx) = mpsc::channel::<StsPipelineEvent>(100);
     
     // Spawn STS pipeline worker (this acts as the supervisor task)
-    let worker = StsPipelineWorker::spawn("test-session-1".to_string(), event_tx);
+    let (recording_tx, _recording_rx) = mpsc::channel(100);
+    let worker = StsPipelineWorker::spawn("test-session-1".to_string(), event_tx, recording_tx);
 
     // Command the worker to inject context
     worker.send_cmd(StsPipelineCmd::InjectContext { 
@@ -80,7 +81,8 @@ async fn test_ai_generated_text_converted_to_voice_webrtc() {
 
     // 7. Verify end-to-end command flow in StsPipelineWorker
     let (event_tx, mut _event_rx) = mpsc::channel::<StsPipelineEvent>(100);
-    let worker = StsPipelineWorker::spawn("session-webrtc-tts-1".to_string(), event_tx);
+    let (recording_tx, _recording_rx) = mpsc::channel(100);
+    let worker = StsPipelineWorker::spawn("session-webrtc-tts-1".to_string(), event_tx, recording_tx);
 
     let inject_res = worker.send_cmd(StsPipelineCmd::InjectContext {
         text: ai_generated_text.to_string(),

@@ -96,6 +96,130 @@ pub struct AppConfig {
     pub property_match_message_template: String,
     pub rag_search_success_message: String,
     pub contract_not_found_message: String,
+    /// Phone-provider ingress is kept separate from browser LiveKit calls.
+    pub telephony: TelephonyConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct TelephonyConfig {
+    pub provider: TelephonyProvider,
+    pub public_base_url: Option<String>,
+    pub webhook_secret: Option<String>,
+    pub twilio_account_sid: Option<String>,
+    pub twilio_auth_token: Option<String>,
+    pub telnyx_public_key: Option<String>,
+    pub telnyx_api_key: Option<String>,
+    pub telnyx_connection_id: Option<String>,
+    pub vonage_signature_secret: Option<String>,
+    pub vonage_api_key: Option<String>,
+    pub vonage_api_secret: Option<String>,
+    pub plivo_auth_id: Option<String>,
+    pub plivo_auth_token: Option<String>,
+    pub sip_gateway_url: Option<String>,
+    pub sip_username: Option<String>,
+    pub sip_password: Option<String>,
+    pub custom_ingress_url: Option<String>,
+    pub custom_api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TelephonyProvider {
+    Disabled,
+    Twilio,
+    Telnyx,
+    Vonage,
+    Plivo,
+    Sip,
+    Custom,
+}
+
+impl TelephonyProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Twilio => "twilio",
+            Self::Telnyx => "telnyx",
+            Self::Vonage => "vonage",
+            Self::Plivo => "plivo",
+            Self::Sip => "sip",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "disabled" | "none" => Ok(Self::Disabled),
+            "twilio" => Ok(Self::Twilio),
+            "telnyx" => Ok(Self::Telnyx),
+            "vonage" => Ok(Self::Vonage),
+            "plivo" => Ok(Self::Plivo),
+            "sip" => Ok(Self::Sip),
+            "custom" => Ok(Self::Custom),
+            other => Err(format!("Unsupported TELEPHONY_PROVIDER: {other}")),
+        }
+    }
+}
+
+impl TelephonyConfig {
+    fn optional_env(key: &str) -> Option<String> {
+        env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn load() -> Result<Self, String> {
+        let provider = TelephonyProvider::parse(
+            &env::var("TELEPHONY_PROVIDER").unwrap_or_else(|_| "disabled".to_string()),
+        )?;
+        Ok(Self {
+            provider,
+            public_base_url: Self::optional_env("TELEPHONY_PUBLIC_BASE_URL"),
+            webhook_secret: Self::optional_env("TELEPHONY_WEBHOOK_SECRET"),
+            twilio_account_sid: Self::optional_env("TWILIO_ACCOUNT_SID"),
+            twilio_auth_token: Self::optional_env("TWILIO_AUTH_TOKEN"),
+            telnyx_public_key: Self::optional_env("TELNYX_PUBLIC_KEY"),
+            telnyx_api_key: Self::optional_env("TELNYX_API_KEY"),
+            telnyx_connection_id: Self::optional_env("TELNYX_CONNECTION_ID"),
+            vonage_signature_secret: Self::optional_env("VONAGE_SIGNATURE_SECRET"),
+            vonage_api_key: Self::optional_env("VONAGE_API_KEY"),
+            vonage_api_secret: Self::optional_env("VONAGE_API_SECRET"),
+            plivo_auth_id: Self::optional_env("PLIVO_AUTH_ID"),
+            plivo_auth_token: Self::optional_env("PLIVO_AUTH_TOKEN"),
+            sip_gateway_url: Self::optional_env("SIP_GATEWAY_URL"),
+            sip_username: Self::optional_env("SIP_USERNAME"),
+            sip_password: Self::optional_env("SIP_PASSWORD"),
+            custom_ingress_url: Self::optional_env("CUSTOM_TELEPHONY_INGRESS_URL"),
+            custom_api_key: Self::optional_env("CUSTOM_TELEPHONY_API_KEY"),
+        })
+    }
+
+    pub fn provider_credentials_configured(&self) -> bool {
+        match self.provider {
+            TelephonyProvider::Disabled => false,
+            TelephonyProvider::Twilio => {
+                self.twilio_account_sid.is_some() && self.twilio_auth_token.is_some()
+            }
+            TelephonyProvider::Telnyx => {
+                self.telnyx_api_key.is_some() && self.telnyx_connection_id.is_some() && self.telnyx_public_key.is_some()
+            }
+            TelephonyProvider::Vonage => {
+                self.vonage_api_key.is_some() && self.vonage_signature_secret.is_some()
+            }
+            TelephonyProvider::Plivo => {
+                self.plivo_auth_id.is_some() && self.plivo_auth_token.is_some()
+            }
+            TelephonyProvider::Sip => self.sip_gateway_url.is_some(),
+            TelephonyProvider::Custom => self.custom_ingress_url.is_some(),
+        }
+    }
+
+    pub fn media_ingress_configured(&self) -> bool {
+        self.provider_credentials_configured()
+            && self.public_base_url.is_some()
+            && self.webhook_secret.is_some()
+    }
 }
 
 impl AppConfig {
@@ -292,6 +416,7 @@ impl AppConfig {
             .map_err(|_| "RAG_SEARCH_SUCCESS_MESSAGE not set in environment".to_string())?;
         let contract_not_found_message = env::var("CONTRACT_NOT_FOUND_MESSAGE")
             .map_err(|_| "CONTRACT_NOT_FOUND_MESSAGE not set in environment".to_string())?;
+        let telephony = TelephonyConfig::load()?;
 
         Ok(AppConfig {
             port,
@@ -364,6 +489,7 @@ impl AppConfig {
             property_match_message_template,
             rag_search_success_message,
             contract_not_found_message,
+            telephony,
         })
     }
 
@@ -470,6 +596,30 @@ impl AppConfig {
                 .unwrap_or_default(),
             contract_not_found_message: env::var("CONTRACT_NOT_FOUND_MESSAGE")
                 .unwrap_or_default(),
+            telephony: TelephonyConfig::load().unwrap_or_else(|_| disabled_telephony_config()),
         }
+    }
+}
+
+fn disabled_telephony_config() -> TelephonyConfig {
+    TelephonyConfig {
+        provider: TelephonyProvider::Disabled,
+        public_base_url: None,
+        webhook_secret: None,
+        twilio_account_sid: None,
+        twilio_auth_token: None,
+        telnyx_public_key: None,
+        telnyx_api_key: None,
+        telnyx_connection_id: None,
+        vonage_signature_secret: None,
+        vonage_api_key: None,
+        vonage_api_secret: None,
+        plivo_auth_id: None,
+        plivo_auth_token: None,
+        sip_gateway_url: None,
+        sip_username: None,
+        sip_password: None,
+        custom_ingress_url: None,
+        custom_api_key: None,
     }
 }
