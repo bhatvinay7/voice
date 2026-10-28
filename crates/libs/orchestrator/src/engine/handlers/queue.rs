@@ -9,6 +9,7 @@ impl SessionActor {
     pub async fn handle_queue_event(&mut self, event: QueueEvent) {
         match event {
             QueueEvent::SessionCancelled { session_id } => {
+                self.orch.phone_media.close(&session_id);
                 println!("[SessionActor {}] Cancel event received.", session_id);
                 if let Some(graph) = &mut self.workflow_graph {
                     graph.status = "Cancelled".to_string();
@@ -168,12 +169,46 @@ impl SessionActor {
                 let _ = self.audio_broadcast_tx.send((session_id.clone(), bytes));
             }
 
+            QueueEvent::TelephonyAudio {
+                session_id,
+                samples,
+                sample_rate,
+                channels,
+                elapsed_samples,
+            } => {
+                if let Some(recording_tx) = &self.s3_dump_tx {
+                    if let Err(error) = recording_tx.try_send(S3DumpData::Audio {
+                        session_id: session_id.clone(),
+                        samples: samples.clone(),
+                        sample_rate,
+                        channels,
+                        elapsed_samples,
+                        speaker: AudioSpeaker::User,
+                    }) {
+                        tracing::warn!(%session_id, %error, "Could not enqueue phone audio for recording");
+                    }
+                }
+                let bytes = samples
+                    .iter()
+                    .flat_map(|sample| sample.to_le_bytes())
+                    .collect::<Vec<_>>();
+                let _ = self.audio_broadcast_tx.send((session_id, bytes));
+            }
+
             QueueEvent::SttTranscript {
                 session_id,
                 text,
                 is_final,
                 ..
             } => {
+                if let Some(recording_tx) = &self.s3_dump_tx {
+                    if let Err(error) = recording_tx.try_send(S3DumpData::Text {
+                        session_id: session_id.clone(),
+                        payload: format!("user_transcript: {} (final: {})", text, is_final),
+                    }) {
+                        tracing::warn!(%session_id, %error, "Could not enqueue transcript for recording");
+                    }
+                }
                 if is_final {
                     if self.ai_listen_muted {
                         println!(
@@ -285,11 +320,13 @@ impl SessionActor {
                         .await;
                 });
 
-                let _ = self.orch.pubsub.publish(SystemEvent::CallSessionStarted {
-                    call_id: session_id,
-                    caller_id: user_id,
-                    language,
-                });
+                if !session_id.starts_with("phone:") {
+                    let _ = self.orch.pubsub.publish(SystemEvent::CallSessionStarted {
+                        call_id: session_id,
+                        caller_id: user_id,
+                        language,
+                    });
+                }
             }
 
             QueueEvent::DbActionCompleted {
@@ -328,10 +365,12 @@ impl SessionActor {
                 session_id,
                 timestamp_ms,
             } => {
-                let _ = self.orch.pubsub.publish(SystemEvent::VoiceBargeIn {
-                    call_id: session_id,
-                    timestamp_ms,
-                });
+                if !session_id.starts_with("phone:") {
+                    let _ = self.orch.pubsub.publish(SystemEvent::VoiceBargeIn {
+                        call_id: session_id,
+                        timestamp_ms,
+                    });
+                }
                 if let Some(sts_tx) = &self.sts_tx {
                     let _ = sts_tx.send(crate::models::StsPipelineCmd::Stop).await;
                 }

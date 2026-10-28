@@ -50,6 +50,14 @@ pub enum QueueEvent {
         pcm_base64: String,
         is_final: bool,
     },
+    /// Decoded phone-provider audio captured for the normal recording pipeline.
+    TelephonyAudio {
+        session_id: String,
+        samples: Vec<i16>,
+        sample_rate: u32,
+        channels: u16,
+        elapsed_samples: u64,
+    },
     SttTranscript {
         session_id: String,
         text: String,

@@ -1,9 +1,9 @@
 use axum::{routing::get, Router};
 use prometheus::{Encoder, TextEncoder};
-use scheduler::{CellControlService, SchedulerState};
-use tonic::transport::Server;
 use scheduler::grpc::cell_control_server::CellControlServer;
+use scheduler::{CellControlService, SchedulerState};
 use std::net::SocketAddr;
+use tonic::transport::Server;
 
 async fn metrics_handler() -> String {
     let encoder = TextEncoder::new();
@@ -31,12 +31,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(9090);
     let grpc_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], grpc_port));
     let http_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], http_port));
-    
-    let state = SchedulerState::new()?;
-    let service = CellControlService { state: state.clone() };
 
-    let app = Router::new().route("/metrics", get(metrics_handler));
-    
+    let state = SchedulerState::new()?;
+    let service = CellControlService {
+        state: state.clone(),
+    };
+
+    let app = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .route("/health", get(|| async { "ok" }));
+
     tokio::spawn(async move {
         match tokio::net::TcpListener::bind(http_addr).await {
             Ok(listener) => {
@@ -56,7 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Server::builder()
         .add_service(CellControlServer::new(service))
-        .add_service(scheduler::tools_grpc::tool_execution_service_server::ToolExecutionServiceServer::new(tool_service))
+        .add_service(
+            scheduler::tools_grpc::tool_execution_service_server::ToolExecutionServiceServer::new(
+                tool_service,
+            ),
+        )
         .serve(grpc_addr)
         .await?;
 

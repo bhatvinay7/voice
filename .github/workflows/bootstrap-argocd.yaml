@@ -1,0 +1,183 @@
+name: Bootstrap ArgoCD
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, main]
+    paths:
+      - ".github/workflows/bootstrap-argocd.yaml"
+
+jobs:
+  bootstrap-argocd:
+    name: Bootstrap ArgoCD on Cluster
+    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate GitOps credentials
+        env:
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          if [ -z "$GITOPS_TOKEN" ]; then
+            echo "Error: GITOPS_TOKEN is not configured in the production environment."
+            exit 1
+          fi
+
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: bhatvinay7/voice-k8s
+          ref: main
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: azure/setup-helm@v4
+
+      - name: Configure kubectl
+        env:
+          KUBE_DATA: ${{ secrets.KUBECONFIG }}
+        run: |
+          if [ -z "$KUBE_DATA" ]; then
+            echo "Error: KUBECONFIG secret is not set!"
+            exit 1
+          fi
+          mkdir -p ~/.kube
+          # Accept either plaintext YAML or base64.
+          if printf "%s" "$KUBE_DATA" | grep -q "apiVersion:"; then
+            printf "%s" "$KUBE_DATA" > ~/.kube/config
+          else
+            printf "%s" "$KUBE_DATA" | base64 -d > ~/.kube/config
+          fi
+          chmod 600 ~/.kube/config
+
+      - name: Install ArgoCD and apply App of Apps
+        env:
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -n argocd --server-side -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          sleep 10
+
+          echo "Registering the GitOps repository with ArgoCD..."
+          kubectl create secret generic voice-k8s-repository \
+            --namespace argocd \
+            --from-literal=type=git \
+            --from-literal=url=https://github.com/bhatvinay7/voice-k8s.git \
+            --from-literal=username=bhatvinay7 \
+            --from-literal=password="$GITOPS_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label secret voice-k8s-repository \
+            --namespace argocd \
+            argocd.argoproj.io/secret-type=repository \
+            --overwrite
+
+          kubectl set resources deployment argocd-server -n argocd --limits=cpu=1000m,memory=1Gi --requests=cpu=250m,memory=256Mi
+          kubectl set resources deployment argocd-repo-server -n argocd --limits=cpu=1000m,memory=1Gi --requests=cpu=250m,memory=256Mi
+
+          echo "Installing cert-manager..."
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.2/cert-manager.crds.yaml
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm upgrade --install cert-manager jetstack/cert-manager \
+            --namespace cert-manager --create-namespace \
+            --version v1.13.2 \
+            --set webhook.timeoutSeconds=10
+
+          echo "Installing ingress-nginx..."
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx --create-namespace \
+            --version 4.10.0 \
+            --set controller.service.type=NodePort \
+            --set controller.service.nodePorts.http=32080 \
+            --set controller.service.nodePorts.https=32443 \
+            --set controller.service.externalTrafficPolicy=Local \
+            --set controller.metrics.enabled=true
+
+          echo "Applying GitOps root App of Apps (installs KEDA, Sealed Secrets, apps)..."
+          kubectl apply -k argocd
+
+          echo "Waiting for the Sealed Secrets controller..."
+          kubectl wait --for=create deployment \
+            --namespace kube-system \
+            --selector=app.kubernetes.io/name=sealed-secrets \
+            --timeout=120s
+          kubectl wait --for=condition=Available deployment \
+            --namespace kube-system \
+            --selector=app.kubernetes.io/name=sealed-secrets \
+            --timeout=180s
+
+      - name: Install kubeseal
+        run: |
+          curl -fSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.27.1/kubeseal-0.27.1-linux-amd64.tar.gz" | tar xz
+          sudo install -m 755 kubeseal /usr/local/bin/kubeseal
+
+      - name: Read controller certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=Established crd/sealedsecrets.bitnami.com --timeout=5m
+          cert="$RUNNER_TEMP/sealed-secrets-cert.pem"
+          # kubeseal --fetch-cert goes through the API server proxy, which is
+          # unreachable from GitHub runners, so read the key secret directly.
+          deadline=$((SECONDS + 300))
+          while (( SECONDS < deadline )); do
+            tls_crt=$(kubectl get secret -n kube-system \
+              -l sealedsecrets.bitnami.com/sealed-secrets-key=active \
+              -o jsonpath='{.items[0].data.tls\.crt}' 2>/dev/null || true)
+            if [ -n "$tls_crt" ] && [ "$tls_crt" != "null" ]; then
+              printf '%s' "$tls_crt" | base64 --decode > "$cert"
+              openssl x509 -in "$cert" -noout
+              echo "SEALED_SECRETS_CERT_FILE=$cert" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "Waiting for sealed-secrets-key secret..."
+            sleep 5
+          done
+          echo "Sealed Secrets certificate unavailable after 5 minutes"
+          exit 1
+
+      - name: Seal secrets
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME || github.repository_owner }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USER: ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          DECISION_LLM_API_KEY: ${{ secrets.DECISION_LLM_API_KEY }}
+          AGENT_LLM_API_KEY: ${{ secrets.AGENT_LLM_API_KEY }}
+          STS_LLM_API_KEY: ${{ secrets.STS_LLM_API_KEY }}
+        run: python3 scripts/seal-secrets.py
+
+      - name: Commit and push GitOps change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apps/sealed-backend-secrets.yaml apps/ghcr-secret.yaml
+          git diff --cached --quiet && exit 0
+          git commit -m "chore(secrets): seal secrets"
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:main"; then
+              exit 0
+            fi
+            git fetch origin main
+            git rebase "origin/main"
+          done
+          echo "Could not push generated GitOps changes after three rebase attempts."
+          exit 1

@@ -9,6 +9,8 @@ mod api;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub slots: orchestrator::slots::Slots,
+    pub phone_media: orchestrator::phone_media::PhoneMediaRegistry,
     pub db: DatabaseStore,
     pub orch_tx: mpsc::Sender<QueueEvent>,
     pub config: AppConfig,
@@ -106,6 +108,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_factory,
     );
 
+    let phone_media = orchestrator.phone_media.clone();
+    let slots = orchestrator.slots.clone();
+
     // 4. Spawn Panic-Safe Tokio Event Loop Actors
     tokio::spawn(Orchestrator::run_dispatcher(
         protected_orch_rx,
@@ -115,17 +120,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start Cell Connection Manager
     let scheduler_endpoint = std::env::var("SCHEDULER_ENDPOINT")
         .unwrap_or_else(|_| "http://[::1]:50051".to_string());
-    let cell_id = std::env::var("HOSTNAME").unwrap_or_else(|_| "cell-dev-1".to_string());
-    let cell_capacity: u32 = std::env::var("MAX_SLOTS_PER_CELL")
-        .unwrap_or_else(|_| "20".to_string())
-        .parse()
-        .unwrap_or(20);
-
+    let cell_id = std::env::var("POD_NAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "cell-dev-1".to_string());
     let conn_mgr = orchestrator::connection::ConnectionManager::new(
-        cell_id,
-        cell_capacity,
-        scheduler_endpoint,
-        orch_tx.clone()
+        cell_id, scheduler_endpoint, orch_tx.clone(), slots.clone()
     );
     tokio::spawn(async move {
         conn_mgr.run().await;
@@ -133,7 +130,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
+    let metrics_slots = slots.clone();
+    tokio::spawn(async move {
+        let port = std::env::var("CELL_METRICS_PORT").ok().and_then(|v| v.parse::<u16>().ok()).unwrap_or(9091);
+        let app = axum::Router::new().route("/metrics", axum::routing::get(move || {
+            let slots = metrics_slots.clone();
+            async move { format!("# TYPE voice_agent_slots_total gauge\nvoice_agent_slots_total {}\n# TYPE voice_agent_slots_used gauge\nvoice_agent_slots_used {}\n", slots.capacity, slots.used()) }
+        }));
+        match tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await {
+            Ok(listener) => { if let Err(error) = axum::serve(listener, app).await { tracing::error!(%error, "cell metrics server failed"); } }
+            Err(error) => tracing::error!(%error, "cell metrics listener failed"),
+        }
+    });
+
     let state = AppState {
+        slots,
+        phone_media,
         db: db.clone(),
         orch_tx,
         config: cfg.clone(),

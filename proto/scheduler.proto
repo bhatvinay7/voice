@@ -3,7 +3,9 @@ syntax = "proto3";
 package scheduler;
 
 service CellControl {
-    // A single long-lived bidirectional stream for all cell-scheduler communication.
+    rpc Start(StartSession) returns (AdmissionResult);
+    rpc Stop(StopSession) returns (AdmissionResult);
+    // One long-lived bidirectional stream per cell/scheduler pair.
     rpc ConnectStream(stream CellMessage) returns (stream SchedulerMessage);
 }
 
@@ -15,6 +17,7 @@ message CellMessage {
         SessionStarted session_started = 3;
         SessionEnded session_ended = 4;
         Heartbeat heartbeat = 5;
+        AdmissionResult admission_result = 6;
     }
 }
 
@@ -62,6 +65,9 @@ message Heartbeat {
 
 message StartSession {
     string session_id = 1;
+    string user_id = 2;
+    string language = 3;
+    uint64 request_id = 4;
 }
 
 message CancelSession {
@@ -75,3 +81,12 @@ message StopSession {
 message Drain {}
 
 message Ping {}
+
+// A rejected request is safe to retry elsewhere with a new routed session ID.
+// A deadline is ambiguous: retry the SAME session ID; never allocate a second call.
+message AdmissionResult {
+    string session_id = 1;
+    bool accepted = 2;
+    string reason = 3;
+    uint64 request_id = 4;
+}

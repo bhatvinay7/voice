@@ -87,12 +87,14 @@ impl SessionActor {
                             )
                             .await;
 
-                            let _ = self.orch.pubsub.publish(SystemEvent::AuditEvent {
-                                call_id: Some(run_id.call_id().to_string()),
-                                event_type: "DEAL_SUGGESTIONS_GENERATED".to_string(),
-                                payload,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                            });
+                            if !run_id.call_id().starts_with("phone:") {
+                                let _ = self.orch.pubsub.publish(SystemEvent::AuditEvent {
+                                    call_id: Some(run_id.call_id().to_string()),
+                                    event_type: "DEAL_SUGGESTIONS_GENERATED".to_string(),
+                                    payload,
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                });
+                            }
                         }
                     }
 
@@ -140,15 +142,15 @@ impl SessionActor {
 
                 if let Some((timeout_dur, run_id_str, tool_name, args, attempt)) = retry_info {
                     self.register_timeout(task_id.clone(), timeout_dur);
-                    let _ = self.orch.pubsub.publish(SystemEvent::AgentToolExecute {
-                        call_id: run_id_str
-                            .strip_prefix("run-")
-                            .unwrap_or(&run_id_str)
-                            .to_string(),
-                        tool_name: tool_name.clone(),
-                        args: args.clone(),
-                        idempotency_key: task_id.0.clone(),
-                    });
+                    let call_id = run_id_str.strip_prefix("run-").unwrap_or(&run_id_str);
+                    if !call_id.starts_with("phone:") {
+                        let _ = self.orch.pubsub.publish(SystemEvent::AgentToolExecute {
+                            call_id: call_id.to_string(),
+                            tool_name: tool_name.clone(),
+                            args: args.clone(),
+                            idempotency_key: task_id.0.clone(),
+                        });
+                    }
 
                     let client = self.orch.tool_client.clone();
                     let q_tx = self.orch.queue_tx.clone();

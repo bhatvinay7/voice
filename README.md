@@ -67,6 +67,24 @@ docker compose -f docker-compose.dev.yml up --build
 
 Set the required service configuration in the relevant `.env` files before starting the stack. Compose starts the four services above; configure LiveKit, Redis, R2, and the LLM provider separately. No PostgreSQL service is included in the current development Compose stack, and each Rust service owns its own `DatabaseStore` process state.
 
+## Phone-provider ingress
+
+Select one provider through `TELEPHONY_PROVIDER` in `.env`: `twilio`, `telnyx`, `vonage`, `plivo`, `sip`, or `custom`. The default is `disabled`; callbacks for all other providers are rejected. Copy the relevant settings from [telephony.env.example](telephony.env.example), supply that provider's credentials, set `TELEPHONY_PUBLIC_BASE_URL` to the public HTTPS backend origin, and restart the backend. Existing web and model configuration stays the same.
+
+Configure your provider's phone number/application to send **POST** answer/incoming and status callbacks to `https://your-backend.example.com/api/telephony/{provider}/incoming`. For Vonage, explicitly set the answer method to POST and enable signed webhooks. Telnyx requires a Voice API application and `TELNYX_PUBLIC_KEY`; Vonage requires `VONAGE_SIGNATURE_SECRET` (separate from its API secret). Twilio, Telnyx, Plivo and Vonage callbacks use their native signature verification. `TELEPHONY_WEBHOOK_SECRET` signs short-lived, session-bound media URLs for every provider. Do not log these capability URLs.
+
+Incoming calls create `phone:{provider}:{provider_call_id}` sessions. The provider connects to the returned WebSocket URL, caller audio is transcribed through the existing STT service, and the agent's TTS audio returns only to that provider socket. No LiveKit room/token is created for phone sessions. Each call has a bounded output channel, one media socket, barge-in clearing and shutdown cleanup. Twilio, Telnyx and Plivo use mono 8 kHz μ-law; Vonage uses mono 16 kHz signed little-endian PCM. These follow the provider protocols documented by [Twilio](https://www.twilio.com/docs/voice/twiml/stream), [Telnyx](https://developers.telnyx.com/docs/voice/programmable-voice/media-streaming), [Plivo](https://docs.plivo.com/docs/voice/xml/audio-streaming), and [Vonage](https://developer.vonage.com/en/voice/voice-api/concepts/websockets).
+
+Phone audio, transcripts, tool events, recordings and session details are excluded from the browser event bus and web call/admin responses. Server-side recording and persistence still run. Browser call routes reject phone session IDs, so the web client cannot join, pause or end a phone call.
+
+For `sip` and `custom`, the external gateway must translate its provider protocol into this contract:
+
+- Send a POST JSON callback with `call_id`, optional `from` and `event: "start"`, authenticated using `Authorization: Bearer <TELEPHONY_WEBHOOK_SECRET>` (or `x-telephony-secret`). Send `event: "hangup"` when the call ends.
+- Connect to the returned `media_url` within 30 seconds and send `{"event":"start","call_id":"<same call_id>","encoding":"pcm_s16le","sample_rate":16000,"channels":1}`.
+- Send and receive mono 16 kHz signed little-endian PCM as binary WebSocket packets. Outbound audio is paced in 20 ms packets. On `{"event":"clear"}`, discard any buffered assistant audio.
+
+`GET /api/telephony/status` reports the selected provider and whether its settings are present, without returning credentials. Real provider credentials, a routed phone number and a public HTTPS/WSS endpoint are required for a live call test; local protocol tests do not make billable calls.
+
 The web app is served on port `3000`, the backend on `4000`, and the scheduler gRPC service on `50051` (metrics on `9090`).
 
 ## Repository layout
@@ -80,3 +98,5 @@ The web app is served on port `3000`, the backend on `4000`, and the scheduler g
 - `crates/libs/rag` — listing and knowledge retrieval
 - `crates/libs/db` — domain store and Redis integration
 - `proto` — gRPC protocol definitions
+
+Scheduler admission, discovery, routing boundaries, and rollout requirements are documented in [docs/scheduler-routing.md](docs/scheduler-routing.md).
