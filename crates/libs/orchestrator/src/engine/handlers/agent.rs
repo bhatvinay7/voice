@@ -1,8 +1,10 @@
 use super::super::session::SessionActor;
 use super::executor::execute_tool;
 use crate::models::*;
+use futures_util::FutureExt;
 use pubsub::SystemEvent;
 use serde_json::json;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 impl SessionActor {
@@ -14,6 +16,23 @@ impl SessionActor {
                 tool_name,
                 args,
             } => {
+                let cfg = config::AppConfig::load()
+                    .unwrap_or_else(|_| config::AppConfig::load_default());
+                if !cfg.tool_wait_tts_prompt.trim().is_empty() {
+                    if let Some(sts_tx) = &self.sts_tx {
+                        match AssertUnwindSafe(sts_tx.send(crate::models::StsPipelineCmd::InjectContext {
+                            text: cfg.tool_wait_tts_prompt,
+                        }))
+                        .catch_unwind()
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => tracing::warn!(%error, "Tool wait prompt could not be queued for TTS"),
+                            Err(_) => tracing::error!("Tool wait prompt TTS delivery panicked; tool execution will continue"),
+                        }
+                    }
+                }
+
                 let task_record = TaskStateRecord {
                     task_id: task_id.clone(),
                     run_id: run_id.clone(),
