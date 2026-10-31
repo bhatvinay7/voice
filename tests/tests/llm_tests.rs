@@ -27,7 +27,7 @@ async fn test_llm_intent_classification_and_out_of_domain_culinary_steering() {
         "search_properties",
         &tool_args,
         "task-culinary-1",
-    );
+    ).await;
 
     assert_eq!(result["success"], true);
     let speech_text = result["response_text"].as_str().unwrap();
@@ -48,28 +48,28 @@ async fn test_verification_gate_and_slot_double_booking_conflict() {
 
     // 1. Unverified user attempts booking -> BLOCKED by verification gate
     let unverified_user = "user-unverified";
-    let res_unverified = db.book_viewing_slot(listing_id, unverified_user, slot_time, "idemp-gate-1");
+    let res_unverified = db.book_viewing_slot(listing_id, unverified_user, slot_time, "idemp-gate-1").await.unwrap();
     assert!(!res_unverified.success);
     assert_eq!(res_unverified.error_code, Some("VERIFICATION_REQUIRED".to_string()));
     assert!(res_unverified.error.unwrap().contains("Emirates ID"));
 
     // 2. User verifies Emirates ID document
-    let verified_profile = db.verify_user_document(unverified_user, "784-1990-1234567-1");
+    let verified_profile = db.verify_user_document(unverified_user, "784-1990-1234567-1").await.unwrap();
     assert!(verified_profile.is_verified);
 
     // 3. Verified user books the slot -> SUCCEEDS
-    let res_verified = db.book_viewing_slot(listing_id, unverified_user, slot_time, "idemp-gate-2");
+    let res_verified = db.book_viewing_slot(listing_id, unverified_user, slot_time, "idemp-gate-2").await.unwrap();
     assert!(res_verified.success);
     let original_booking_id = res_verified.booking.as_ref().unwrap().id.clone();
 
     // 4. Another user attempts to book the SAME slot -> CONFLICT! BLOCKED with SLOT_UNAVAILABLE
     let second_user = "user-verified";
-    let res_conflict = db.book_viewing_slot(listing_id, second_user, slot_time, "idemp-gate-3");
+    let res_conflict = db.book_viewing_slot(listing_id, second_user, slot_time, "idemp-gate-3").await.unwrap();
     assert!(!res_conflict.success, "Second user must not be able to double-book already reserved slot");
     assert_eq!(res_conflict.error_code, Some("SLOT_UNAVAILABLE".to_string()));
 
     // 5. Original user retries with SAME idempotency key -> Idempotent success (returns same booking)
-    let res_idempotent = db.book_viewing_slot(listing_id, unverified_user, slot_time, "idemp-gate-2");
+    let res_idempotent = db.book_viewing_slot(listing_id, unverified_user, slot_time, "idemp-gate-2").await.unwrap();
     assert!(res_idempotent.success);
     assert_eq!(res_idempotent.booking.unwrap().id, original_booking_id, "Idempotent retry must return existing booking");
 }

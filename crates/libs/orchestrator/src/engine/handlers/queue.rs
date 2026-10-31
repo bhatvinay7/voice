@@ -69,7 +69,7 @@ impl SessionActor {
                             return;
                         }
 
-                        let audio_url =
+                        let (audio_url, text_url) =
                             match tokio::time::timeout(Duration::from_secs(60), result_rx).await {
                                 Ok(Ok(Ok(audio_url))) => audio_url,
                                 Ok(Ok(Err(error))) => {
@@ -103,7 +103,7 @@ impl SessionActor {
                                 idempotency_key: format!("task-db-s3-{}", trace_id),
                                 session_id: recording_session.clone(),
                                 audio_url,
-                                text_url: String::new(),
+                                text_url,
                                 reply_to,
                             })
                             .await
@@ -146,6 +146,7 @@ impl SessionActor {
                 user_id,
                 language,
             } => {
+                self.user_id = user_id.clone();
                 let task_id = TaskId(format!("task-db-{}", session_id));
                 self.dispatch_db_action(
                     task_id,
@@ -201,14 +202,9 @@ impl SessionActor {
                 is_final,
                 ..
             } => {
-                if let Some(recording_tx) = &self.s3_dump_tx {
-                    if let Err(error) = recording_tx.try_send(S3DumpData::Text {
-                        session_id: session_id.clone(),
-                        payload: format!("user_transcript: {} (final: {})", text, is_final),
-                    }) {
-                        tracing::warn!(%session_id, %error, "Could not enqueue transcript for recording");
-                    }
-                }
+                self.publish_conversation("USER_PROMPT", json!({
+                    "text": text.clone(), "role": "user", "final": is_final,
+                }).to_string());
                 if is_final {
                     if self.ai_listen_muted {
                         println!(
@@ -219,7 +215,7 @@ impl SessionActor {
                         let _ = agent_tx
                             .send(crate::models::AgentCmd::UserInput {
                                 run_id: self.run_id.clone(),
-                                user_id: session_id.clone(),
+                                user_id: self.user_id.clone(),
                                 role: crate::models::SpeakerRole::Candidate,
                                 text: text.clone(),
                             })
@@ -392,20 +388,9 @@ impl SessionActor {
                         }
                     }
                     StsPipelineEvent::UserTranscriptChunk { text, is_final } => {
-                        if let Some(s3_tx) = &self.s3_dump_tx {
-                            if s3_tx
-                                .try_send(S3DumpData::Text {
-                                    session_id: session_id.clone(),
-                                    payload: format!(
-                                        "user_transcript: {} (final: {})",
-                                        text, is_final
-                                    ),
-                                })
-                                .is_err()
-                            {
-                                tracing::trace!("Session {} recording text queue full; dropping transcript copy", session_id);
-                            }
-                        }
+                        self.publish_conversation("USER_PROMPT", json!({
+                            "text": text.clone(), "role": "user", "final": is_final,
+                        }).to_string());
 
                         if is_final {
                             let trimmed = text.trim();
@@ -435,7 +420,7 @@ impl SessionActor {
                                     let _ = agent_tx
                                         .send(crate::models::AgentCmd::UserInput {
                                             run_id: self.run_id.clone(),
-                                            user_id: session_id.clone(),
+                                            user_id: self.user_id.clone(),
                                             role: crate::models::SpeakerRole::Candidate,
                                             text: text.clone(),
                                         })
@@ -445,17 +430,10 @@ impl SessionActor {
                         }
                     }
                     StsPipelineEvent::AiTranscriptChunk { text } => {
-                        if let Some(s3_tx) = &self.s3_dump_tx {
-                            if s3_tx
-                                .try_send(S3DumpData::Text {
-                                    session_id: session_id.clone(),
-                                    payload: format!("ai_transcript: {}", text),
-                                })
-                                .is_err()
-                            {
-                                tracing::trace!("Session {} recording text queue full; dropping transcript copy", session_id);
-                            }
-                        }
+                        // The agent response is the canonical assistant transcript and was
+                        // already broadcast before STS began speech synthesis. Keep this
+                        // callback for transport observability without duplicating history.
+                        tracing::debug!(%session_id, %text, "STS assistant transcript received");
                     }
                     StsPipelineEvent::AudioComplete => {
                         let sts_task_id = TaskId(format!("sts-{}", session_id));

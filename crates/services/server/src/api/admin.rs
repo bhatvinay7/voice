@@ -13,27 +13,35 @@ pub struct AdminLoginReq {
     pub password: String,
 }
 
+pub(crate) fn valid_admin_credentials(cfg: &config::AppConfig, email: &str, password: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    if cfg.admin_email.is_empty() || cfg.admin_password.is_empty() || !email.eq_ignore_ascii_case(&cfg.admin_email) {
+        return false;
+    }
+    let mut expected = Hmac::<sha2::Sha256>::new_from_slice(cfg.admin_password.as_bytes()).expect("HMAC accepts all key sizes");
+    let mut supplied = Hmac::<sha2::Sha256>::new_from_slice(password.as_bytes()).expect("HMAC accepts all key sizes");
+    expected.update(b"admin-login");
+    supplied.update(b"admin-login");
+    expected.verify_slice(&supplied.finalize().into_bytes()).is_ok()
+}
+
 pub async fn admin_login(
     State(state): State<AppState>,
     Json(payload): Json<AdminLoginReq>,
 ) -> impl IntoResponse {
-    // 1. Look up user by email or user_id from the database
-    let user_profile = state
-        .db
-        .get_user_by_email(&payload.email)
-        .or_else(|| state.db.get_user(&payload.email));
-
-    let user = match user_profile {
-        Some(u) => u,
+    if state.config.admin_email.is_empty() || state.config.admin_password.is_empty() {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"success": false, "error": "Set ADMIN_EMAIL and ADMIN_PASSWORD in the server environment"}))).into_response();
+    }
+    if !valid_admin_credentials(&state.config, &payload.email, &payload.password) {
+        return (axum::http::StatusCode::UNAUTHORIZED,
+            Json(json!({"success": false, "error": "Invalid administrator credentials"}))).into_response();
+    }
+    let user = match db_try!(state.db.get_user_by_email(&state.config.admin_email)) {
+        Some(user) => user,
         None => {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "success": false,
-                    "error": "User account not found in database"
-                })),
-            )
-                .into_response();
+            let id = format!("user-{}", state.config.admin_email.replace('@', "-").replace('.', "-"));
+            db_try!(state.db.upsert_user(&id, "", &state.config.admin_email, "admin", "email"))
         }
     };
 
@@ -80,13 +88,13 @@ pub async fn admin_add_listing(
     State(state): State<AppState>,
     Json(payload): Json<PropertyListing>,
 ) -> impl IntoResponse {
-    state.db.add_listing(payload.clone());
+    db_try!(state.db.add_listing(payload.clone()));
 
     if let Err(e) = state.rag.upsert_property_to_vector(&payload).await {
         eprintln!("Failed to upsert to Upstash Vector: {}", e);
     }
 
-    Json(json!({ "success": true, "listing": payload }))
+    Json(json!({ "success": true, "listing": payload })).into_response()
 }
 
 pub async fn admin_update_listing(
@@ -95,7 +103,7 @@ pub async fn admin_update_listing(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(payload): Json<PropertyListing>,
 ) -> impl IntoResponse {
-    let updated = state.db.update_listing(&id, payload.clone());
+    let updated = db_try!(state.db.update_listing(&id, payload.clone()));
 
     if updated {
         if let Err(e) = state.rag.upsert_property_to_vector(&payload).await {
@@ -103,7 +111,7 @@ pub async fn admin_update_listing(
         }
     }
 
-    Json(json!({ "success": updated, "listing": payload }))
+    Json(json!({ "success": updated, "listing": payload })).into_response()
 }
 
 pub async fn admin_delete_listing(
@@ -111,16 +119,16 @@ pub async fn admin_delete_listing(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let deleted = state.db.delete_listing(&id);
-    Json(json!({ "success": deleted }))
+    let deleted = db_try!(state.db.delete_listing(&id));
+    Json(json!({ "success": deleted })).into_response()
 }
 
 pub async fn admin_get_graph(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let nodes = state.db.get_graph_nodes();
-    Json(json!({ "success": true, "graph_nodes": nodes }))
+    let nodes = db_try!(state.db.get_graph_nodes());
+    Json(json!({ "success": true, "graph_nodes": nodes })).into_response()
 }
 
 pub async fn admin_add_graph_node(
@@ -128,8 +136,8 @@ pub async fn admin_add_graph_node(
     State(state): State<AppState>,
     Json(payload): Json<AdminGraphNode>,
 ) -> impl IntoResponse {
-    state.db.add_graph_node(payload.clone());
-    Json(json!({ "success": true, "node": payload }))
+    db_try!(state.db.add_graph_node(payload.clone()));
+    Json(json!({ "success": true, "node": payload })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -143,8 +151,8 @@ pub async fn admin_update_graph_node(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(payload): Json<UpdateGraphNodeReq>,
 ) -> impl IntoResponse {
-    let updated = state.db.update_graph_node(&id, payload.instruction);
-    Json(json!({ "success": updated }))
+    let updated = db_try!(state.db.update_graph_node(&id, payload.instruction));
+    Json(json!({ "success": updated })).into_response()
 }
 
 pub async fn admin_delete_graph_node(
@@ -152,8 +160,8 @@ pub async fn admin_delete_graph_node(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let deleted = state.db.delete_graph_node(&id);
-    Json(json!({ "success": deleted }))
+    let deleted = db_try!(state.db.delete_graph_node(&id));
+    Json(json!({ "success": deleted })).into_response()
 }
 
 pub async fn admin_get_logs(
@@ -241,11 +249,11 @@ pub async fn admin_get_session_details(
         }
     };
     let user_profile = if let Some(ref s) = summary {
-        state.db.get_user(&s.user_id)
+        db_try!(state.db.get_user(&s.user_id))
     } else {
         None
     };
-    let all_events = match state.db.load_recent_stream_events().await {
+    let all_events = match state.db.load_session_events(&session_id).await {
         Ok(events) => events,
         Err(error) => {
             return (
@@ -257,7 +265,7 @@ pub async fn admin_get_session_details(
     };
     let session_events: Vec<_> = all_events
         .into_iter()
-        .filter(|e| e.session_id == session_id)
+        .filter(|e| e.session_id == session_id || e.session_id == format!("run-{session_id}"))
         .collect();
     let conversation_events: Vec<_> = session_events
         .iter()
@@ -367,20 +375,20 @@ pub async fn admin_add_knowledge_doc(
     State(state): State<AppState>,
     Json(payload): Json<KnowledgeDocument>,
 ) -> impl IntoResponse {
-    state.db.add_knowledge_document(payload.clone());
+    db_try!(state.db.add_knowledge_document(payload.clone()));
 
     if let Err(e) = state.rag.upsert_document_to_vector(&payload).await {
         eprintln!("Failed to upsert knowledge document to Upstash Vector: {}", e);
     }
 
-    Json(json!({ "success": true, "document": payload }))
+    Json(json!({ "success": true, "document": payload })).into_response()
 }
 
 pub async fn admin_get_knowledge_docs(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let docs = state.db.get_knowledge_documents();
-    Json(json!({ "success": true, "documents": docs }))
+    let docs = db_try!(state.db.get_knowledge_documents());
+    Json(json!({ "success": true, "documents": docs })).into_response()
 }
 

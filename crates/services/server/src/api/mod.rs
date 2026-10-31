@@ -1,3 +1,15 @@
+macro_rules! db_try {
+    ($operation:expr) => {
+        match $operation.await {
+            Ok(value) => value,
+            Err(_) => return axum::response::IntoResponse::into_response((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"success": false, "error": "Database unavailable"})),
+            )),
+        }
+    };
+}
+
 use axum::{
     response::IntoResponse,
     routing::{get, post, put},

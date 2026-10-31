@@ -83,7 +83,7 @@ async fn test_multi_turn_voice_conversation_after_greeting() {
                 &tool_name,
                 &args,
                 &task_id.0,
-            );
+            ).await;
             assert_eq!(tool_output["success"], true);
             let reply_text = tool_output["response_text"].as_str().unwrap();
             
@@ -149,7 +149,7 @@ async fn test_multi_turn_voice_conversation_after_greeting() {
                 &tool_name,
                 &args,
                 &task_id.0,
-            );
+            ).await;
             // user-unverified triggers Emirates ID document requirement guidance
             let reply_text = tool_output["response_text"].as_str().unwrap();
             assert!(

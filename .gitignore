@@ -66,3 +66,5 @@ logs/exit.txt
 
 # Track the documented template only; keep real environment files ignored.
 !/.env.example
+mem.md
+plan.md

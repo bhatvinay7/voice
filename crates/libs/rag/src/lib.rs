@@ -3,6 +3,13 @@ pub use filters::*;
 
 use db::{DatabaseStore, KnowledgeDocument, PropertyListing};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+
+struct RewriteRequest {
+    query: String,
+    response: oneshot::Sender<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RAGSearchResult {
@@ -50,37 +57,72 @@ pub struct RAGPipeline {
     upstash_client: reqwest::Client,
     upstash_url: String,
     upstash_token: String,
+    /// A session-independent queue. Each request is processed in its own task,
+    /// so a slow fast-model completion never serializes other RAG requests.
+    rewrite_tx: mpsc::Sender<RewriteRequest>,
 }
 
 impl RAGPipeline {
     pub fn new(db: DatabaseStore) -> Self {
         let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
+        let rewrite_tx = spawn_query_rewriter(
+            cfg.fast_model_endpoint_url.clone(), cfg.fast_model_api_key.clone(),
+            cfg.fast_model.clone(), cfg.rag_business_keywords.clone(),
+        );
         Self {
             db,
             upstash_client: reqwest::Client::new(),
             upstash_url: cfg.upstash_vector_rest_url,
             upstash_token: cfg.upstash_vector_rest_token,
+            rewrite_tx,
         }
     }
 
     pub fn from_config(db: DatabaseStore, upstash_url: String, upstash_token: String) -> Self {
+        let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
         Self {
             db,
             upstash_client: reqwest::Client::new(),
             upstash_url,
             upstash_token,
+            rewrite_tx: spawn_query_rewriter(
+                cfg.fast_model_endpoint_url, cfg.fast_model_api_key,
+                cfg.fast_model, cfg.rag_business_keywords,
+            ),
         }
     }
 
+    /// Rewrites the query before every retrieval. Failure, a full queue, a
+    /// panic, or a timeout always falls back to the exact user query.
+    pub async fn rewrite_query(&self, query: &str) -> String {
+        let (response_tx, response_rx) = oneshot::channel();
+        if self.rewrite_tx.send(RewriteRequest { query: query.to_string(), response: response_tx }).await.is_err() {
+            return query.to_string();
+        }
+        tokio::time::timeout(Duration::from_secs(3), response_rx)
+            .await.ok().and_then(Result::ok)
+            .filter(|rewritten| !rewritten.trim().is_empty())
+            .unwrap_or_else(|| query.to_string())
+    }
+
     /// Delegates natural language parsing to filters module.
-    pub fn parse_query_to_filters(&self, query: &str) -> SearchQueryFilters {
-        filters::parse_query_to_filters(&self.db, query)
+    pub async fn parse_query_to_filters(&self, query: &str) -> Result<SearchQueryFilters, String> {
+        filters::parse_query_to_filters(&self.db, query).await
     }
 
     /// Dynamic semantic & keyword search across database property listings.
-    pub fn search(&self, query: &str) -> Vec<RAGSearchResult> {
-        let filters = self.parse_query_to_filters(query);
-        let listings = self.db.get_listings();
+    pub async fn search(&self, query: &str) -> Result<Vec<RAGSearchResult>, String> {
+        let query = self.rewrite_query(query).await;
+        if !self.upstash_url.trim().is_empty() && !self.upstash_token.trim().is_empty() {
+            return self.search_vector_db_rewritten(&query, 10).await;
+        }
+        self.search_local(&query).await
+    }
+
+    /// Local filter/keyword fallback for unavailable vector search.
+    async fn search_local(&self, query: &str) -> Result<Vec<RAGSearchResult>, String> {
+        let filters = self.parse_query_to_filters(query).await?;
+        let listings = self.db.get_listings().await?;
         let terms: Vec<String> = query
             .to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
@@ -188,19 +230,20 @@ impl RAGPipeline {
                 .partial_cmp(&a.relevance_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results
+        Ok(results)
     }
 
     /// Dynamically searches knowledge documents for UAE real estate purchase procedures,
     /// DLD laws, Golden Visa regulations, fee schedules, and conveyancing rules.
-    pub fn search_knowledge(&self, query: &str) -> Vec<KnowledgeSearchResult> {
+    pub async fn search_knowledge(&self, query: &str) -> Result<Vec<KnowledgeSearchResult>, String> {
+        let query = self.rewrite_query(query).await;
         let q_lower = query.to_lowercase();
         let query_tokens: Vec<&str> = q_lower
             .split(|c: char| !c.is_alphanumeric())
             .filter(|s| s.len() > 2)
             .collect();
 
-        let docs = self.db.get_knowledge_documents();
+        let docs = self.db.get_knowledge_documents().await?;
         let mut matches: Vec<KnowledgeSearchResult> = docs
             .into_iter()
             .filter_map(|doc| {
@@ -243,7 +286,7 @@ impl RAGPipeline {
                 .partial_cmp(&a.relevance_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        matches
+        Ok(matches)
     }
 
     /// Asynchronous vector query against Upstash Vector REST API.
@@ -251,7 +294,16 @@ impl RAGPipeline {
         &self,
         query: &str,
         top_k: usize,
-    ) -> Result<Vec<RAGSearchResult>, reqwest::Error> {
+    ) -> Result<Vec<RAGSearchResult>, String> {
+        let query = self.rewrite_query(query).await;
+        self.search_vector_db_rewritten(&query, top_k).await
+    }
+
+    async fn search_vector_db_rewritten(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<RAGSearchResult>, String> {
         let endpoint = format!("{}/query-data", self.upstash_url);
         let payload = serde_json::json!({
             "data": query,
@@ -266,14 +318,14 @@ impl RAGPipeline {
             .header("Authorization", format!("Bearer {}", self.upstash_token))
             .json(&payload)
             .send()
-            .await?;
+            .await.map_err(|e| e.to_string())?;
 
         if !resp.status().is_success() {
-            return Ok(self.search(query));
+            return self.search_local(query).await;
         }
 
         let vector_hits: Vec<UpstashQueryResult> = resp.json().await.unwrap_or_default();
-        let listings = self.db.get_listings();
+        let listings = self.db.get_listings().await.map_err(|e| e.to_string())?;
 
         let mut results = Vec::new();
         for hit in vector_hits {
@@ -287,7 +339,7 @@ impl RAGPipeline {
         }
 
         if results.is_empty() {
-            Ok(self.search(query))
+            self.search_local(query).await
         } else {
             Ok(results)
         }
@@ -369,4 +421,80 @@ impl RAGPipeline {
 
         Ok(())
     }
+}
+
+fn spawn_query_rewriter(
+    endpoint: String,
+    api_key: String,
+    model: String,
+    business_keywords: Vec<String>,
+) -> mpsc::Sender<RewriteRequest> {
+    let (tx, mut rx) = mpsc::channel::<RewriteRequest>(1_024);
+    tokio::spawn(async move {
+        while let Some(request) = rx.recv().await {
+            let endpoint = endpoint.clone();
+            let api_key = api_key.clone();
+            let model = model.clone();
+            let business_keywords = business_keywords.clone();
+            // Each request gets an isolated task. A panic is observed here and
+            // converted into the original query instead of killing the queue.
+            tokio::spawn(async move {
+                let original = request.query.clone();
+                let model_query = original.clone();
+                let completion = tokio::spawn(async move {
+                    rewrite_with_fast_model(endpoint, api_key, model, business_keywords, model_query).await
+                });
+                let rewritten = match completion.await {
+                    Ok(Ok(value)) if !value.trim().is_empty() => value,
+                    Ok(Err(error)) => {
+                        tracing::debug!("RAG fast query rewrite failed: {error}");
+                        original
+                    }
+                    Err(error) => {
+                        tracing::warn!("RAG fast query rewrite task panicked or was cancelled: {error}");
+                        original
+                    }
+                    _ => original,
+                };
+                let _ = request.response.send(rewritten);
+            });
+        }
+    });
+    tx
+}
+
+async fn rewrite_with_fast_model(
+    endpoint: String,
+    api_key: String,
+    model: String,
+    business_keywords: Vec<String>,
+    query: String,
+) -> Result<String, String> {
+    if endpoint.trim().is_empty() || api_key.trim().is_empty() || model.trim().is_empty() {
+        return Ok(query);
+    }
+    let vocabulary = business_keywords.join(", ");
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": format!("Rewrite real-estate retrieval queries for vector search. Preserve every concrete user constraint; add only relevant terms from this business vocabulary: {vocabulary}. Return only the improved search query.")},
+            {"role": "user", "content": query}
+        ],
+        "temperature": 0.0,
+        "max_tokens": 160
+    });
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&body)
+        .timeout(Duration::from_secs(3))
+        .send().await.map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("fast model returned {}", response.status()));
+    }
+    response.json::<serde_json::Value>().await.map_err(|error| error.to_string())?
+        .pointer("/choices/0/message/content").and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "fast model response did not contain a query".to_string())
 }

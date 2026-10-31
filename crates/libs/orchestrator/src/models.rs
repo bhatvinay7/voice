@@ -184,12 +184,27 @@ pub enum S3DumpData {
     },
     Finalize {
         session_id: String,
-        reply_to: tokio::sync::oneshot::Sender<Result<String, String>>,
+        reply_to: tokio::sync::oneshot::Sender<Result<(String, String), String>>,
     },
+}
+
+/// Live transcript event faned out inside one call session.
+/// S3 and Redis each subscribe to the same per-session broadcast channel.
+#[derive(Debug, Clone)]
+pub struct ConversationEvent {
+    pub session_id: String,
+    pub trace_id: String,
+    pub event_type: String,
+    pub payload_json: String,
 }
 
 #[derive(Debug, Clone)]
 pub enum AgentCmd {
+    /// Installs the session-scoped conversation broadcast channel once the actor starts.
+    SetConversationFanout {
+        run_id: RunId,
+        conversation_tx: tokio::sync::broadcast::Sender<ConversationEvent>,
+    },
     Start {
         run_id: RunId,
         input: String,

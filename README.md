@@ -1,6 +1,6 @@
 # Real Estate Voice Assistant
 
-A Rust and Next.js application for real-estate voice calls, property and knowledge search, viewing bookings, contract review, and call summaries. The development Compose stack runs the web app, backend API, scheduler, and summary worker. LiveKit, Redis, Cloudflare R2, and the configured LLM provider are external dependencies.
+A Rust and Next.js application for real-estate voice calls, property and knowledge search, viewing bookings, contract review, and call summaries. The development Compose stack runs the web app, backend API, scheduler, and summary worker. Neon PostgreSQL, LiveKit, Redis, Cloudflare R2, and the configured LLM provider are external dependencies.
 
 ## Architecture
 
@@ -14,12 +14,13 @@ flowchart TB
     Agent[LLM agent actor]
     Scheduler["Scheduler gRPC<br/>cell control and tool execution"]
     RAG["RAG pipeline<br/>listings and knowledge"]
+    Fanout["Per-session transcript broadcast<br/>S3 and Redis subscribers"]
     Recording["Recording worker<br/>sample-timed PCM → stereo WAV"]
     R2[(Cloudflare R2)]
     Redis[(Redis)]
     Worker[Summary worker]
     LLM[Configured LLM provider]
-    Store["DatabaseStore<br/>process-local domain data"]
+    Store["Neon PostgreSQL<br/>shared domain data and call history"]
     LiveKit[(LiveKit Cloud)]
 
     Browser -->|HTTP requests| Backend
@@ -31,22 +32,27 @@ flowchart TB
     Session --> Agent
     STS <-->|agent audio tracks| LiveKit
     STS -->|final transcripts| Session
+    Agent -->|assistant transcript| Session
+    Session --> Fanout
+    Fanout -->|transcript.txt| Recording
+    Fanout -->|session-named stream| Redis
     STS -->|user and assistant PCM| Recording
     Agent -->|tool requests| Scheduler
     Scheduler --> RAG --> Store
-    Agent -->|conversation events| Redis
+    Redis -->|conversation worker persists events| Store
     Recording -->|assembled WAV| R2
     Recording -->|recording URL| Store
-    Redis -->|summary job and transcript| Worker
+    Redis -->|summary jobs| Worker
+    Store -->|transcript and recording context| Worker
     Worker --> LLM
-    Worker -->|summary| Redis
+    Worker -->|summary| Store
 ```
 
 ## Call workflow
 
 When a caller starts a session, the backend creates a per-call `SessionActor` and returns the credentials needed to join a LiveKit room. The browser sends and receives audio directly through LiveKit; the backend's STS worker joins the same room to process incoming audio and publish the assistant's voice. VAD detects speech, STT produces a transcript, and the agent uses listing or knowledge context to answer. When a tool is needed, the agent calls the scheduler over gRPC, where the RAG and booking tools run.
 
-User and assistant PCM frames are collected alongside the live call. When the session ends, the recording worker places frames on a sample-based timeline, assembles separate speaker tracks into a stereo 16 kHz WAV, and uploads it to Cloudflare R2. Conversation events and summary jobs use Redis. The worker loads the transcript events for a completed call, asks the configured LLM to summarize them, and saves the summary.
+User and assistant PCM frames are collected alongside the live call. Each call owns a Rust broadcast channel: the S3 subscriber writes `transcript.txt` beside the stereo 16 kHz WAV, while the Redis subscriber writes the same events to a stream named exactly after the session. Redis conversation streams have no TTL. The conversation worker reads the Redis stream, commits events to Neon idempotently, then deletes the Redis stream only after that commit succeeds. S3 is an archive and is never used to update Neon. Each agent actor has its own MPSC Redis-poll worker and delay queue, so it can refresh session context without blocking its command loop.
 
 ## Services
 
@@ -65,7 +71,7 @@ From this directory:
 docker compose -f docker-compose.dev.yml up --build
 ```
 
-Set the required service configuration in the relevant `.env` files before starting the stack. Compose starts the four services above; configure LiveKit, Redis, R2, and the LLM provider separately. No PostgreSQL service is included in the current development Compose stack, and each Rust service owns its own `DatabaseStore` process state.
+Set the required service configuration in the relevant `.env` files before starting the stack. Compose starts the four services above; configure LiveKit, Redis, R2, and the LLM provider separately. Set the same Neon pooled `NEON_POOLER_URL` (a hostname ending in `-pooler`) for all three Rust services, then run the migrations below before starting them. `POSTGRES_DIRECT_URL` is optional and is used only by the migration runner. Services share PostgreSQL data through asynchronous connection pools and fail startup if Neon or the schema is unavailable. Domain records have no in-memory or SQLite fallback. Sled is used only for local orchestration slots, not user records or call history.
 
 ## Phone-provider ingress
 
@@ -100,3 +106,30 @@ The web app is served on port `3000`, the backend on `4000`, and the scheduler g
 - `proto` — gRPC protocol definitions
 
 Scheduler admission, discovery, routing boundaries, and rollout requirements are documented in [docs/scheduler-routing.md](docs/scheduler-routing.md).
+
+## PostgreSQL schema migrations
+
+Run `python3 scripts/migrate-db.py` with Python 3 and a PostgreSQL `psql` client installed.
+The runner reads `POSTGRES_DIRECT_URL` first, then `NEON_POOLER_URL`, `POSTGRES_URL`, or `DATABASE_URL` from the process environment,
+then the backend `.env`, then the root `.env`. It applies SQL files in `migrations/`
+in one transaction, records checksums in `public.schema_migrations`, and serializes
+concurrent migration runs with an advisory lock. Use `--status` to list public tables.
+Do not edit applied migration files; add a new numbered SQL migration instead.
+
+Application reads and writes use these tables directly. Booking, notification outbox,
+and booking retry responses commit in one transaction; PostgreSQL also enforces one
+confirmed booking per listing/time slot. Audio WAV files remain in R2; their locations,
+transcript events, user context, and generated summaries are stored in Neon.
+
+For an installation upgrading from Redis call-history storage, run
+`cargo run -p db --example import_legacy_redis` with the service environment loaded.
+This imports existing summaries, recording metadata, and stream events without deleting
+Redis data or overwriting existing Neon records. Re-running it does not duplicate events.
+Export any process-local records from the old running service before replacing it;
+process-local data cannot be recovered after that process has exited.
+
+`cargo test -p db --lib -- --ignored` runs the opt-in PostgreSQL persistence test using
+the configured service environment. It writes uniquely named fixtures, verifies reads
+through new connections and concurrent booking protection, then deletes its fixtures.
+The older end-to-end tests require their own seeded test database and external services;
+do not point those tests at a production database.

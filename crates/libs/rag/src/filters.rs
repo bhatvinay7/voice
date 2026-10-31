@@ -13,7 +13,7 @@ pub struct SearchQueryFilters {
 }
 
 /// Dynamically parses natural language queries into structured search filters.
-pub fn parse_query_to_filters(db: &DatabaseStore, query: &str) -> SearchQueryFilters {
+pub async fn parse_query_to_filters(db: &DatabaseStore, query: &str) -> Result<SearchQueryFilters, String> {
     let lower = query.to_lowercase();
     let mut filters = SearchQueryFilters::default();
     let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
@@ -59,7 +59,7 @@ pub fn parse_query_to_filters(db: &DatabaseStore, query: &str) -> SearchQueryFil
     }
 
     // 3. Location & City (dynamically matched from database entries)
-    let listings = db.get_listings();
+    let listings = db.get_listings().await?;
     for listing in &listings {
         if !listing.location.is_empty() && lower.contains(&listing.location.to_lowercase()) {
             filters.location = Some(listing.location.clone());
@@ -95,7 +95,7 @@ pub fn parse_query_to_filters(db: &DatabaseStore, query: &str) -> SearchQueryFil
     // 5. Dynamic budget / price extraction
     filters.max_price_aed = parse_dynamic_budget(&lower);
 
-    filters
+    Ok(filters)
 }
 
 /// Helper function to parse dynamic monetary quantities from user natural language query.

@@ -130,22 +130,22 @@ async fn test_webrtc_mic_audio_data_sending_and_forwarding() {
 async fn test_dynamic_db_role_update_and_admin_rbac() {
     let db = DatabaseStore::new();
 
-    let admin_user = db.get_user("user-admin").expect("user-admin must exist in db");
+    let admin_user = db.get_user("user-admin").await.unwrap().expect("user-admin must exist in db");
     assert_eq!(admin_user.role, "admin");
 
-    let normal_user = db.get_user("user-verified").expect("user-verified must exist in db");
+    let normal_user = db.get_user("user-verified").await.unwrap().expect("user-verified must exist in db");
     assert_eq!(normal_user.role, "user");
 
     assert_ne!(normal_user.role, "admin");
 
-    let promoted = db.update_user_role("user-verified", "admin").expect("Role update should succeed");
+    let promoted = db.update_user_role("user-verified", "admin").await.unwrap().expect("Role update should succeed");
     assert_eq!(promoted.role, "admin");
 
-    let updated_user = db.get_user("user-verified").expect("user-verified must exist in db");
+    let updated_user = db.get_user("user-verified").await.unwrap().expect("user-verified must exist in db");
     assert_eq!(updated_user.role, "admin");
 
-    let demoted = db.update_user_role("user-verified", "user").expect("Role demote should succeed");
+    let demoted = db.update_user_role("user-verified", "user").await.unwrap().expect("Role demote should succeed");
     assert_eq!(demoted.role, "user");
-    let demoted_user = db.get_user("user-verified").unwrap();
+    let demoted_user = db.get_user("user-verified").await.unwrap().unwrap();
     assert_eq!(demoted_user.role, "user");
 }

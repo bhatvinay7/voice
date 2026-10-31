@@ -1,37 +1,14 @@
 use crate::models::PropertyListing;
-use super::{this_lock, DatabaseStore};
+use super::{DatabaseStore, DbResult, postgres::error};
 
 impl DatabaseStore {
-    pub fn add_listing(&self, listing: PropertyListing) {
-        if let Ok(mut guard) = self.listings.lock() {
-            guard.push(listing);
-        }
+    pub async fn add_listing(&self, listing: PropertyListing) -> DbResult<()> { self.save(&listing).await }
+    pub async fn update_listing(&self, listing_id: &str, new_listing: PropertyListing) -> DbResult<bool> {
+        if listing_id != new_listing.id { return Err("Listing ID cannot be changed".into()); }
+        let json = serde_json::to_string(&new_listing).map_err(|_| "Invalid listing")?;
+        Ok(sqlx::query("UPDATE public.property_listings SET (title, secondary_title, description, secondary_description, city, location, price_aed, listing_type, bedrooms, bathrooms, area_sqft, pet_friendly, near_metro, agent_id, available_slots) = (SELECT title, secondary_title, description, secondary_description, city, location, price_aed, listing_type, bedrooms, bathrooms, area_sqft, pet_friendly, near_metro, agent_id, available_slots FROM json_populate_record(NULL::public.property_listings, $2::json)) WHERE id = $1")
+            .bind(listing_id).bind(json).execute(&self.pool).await.map_err(error)?.rows_affected() > 0)
     }
-
-    pub fn update_listing(&self, listing_id: &str, new_listing: PropertyListing) -> bool {
-        if let Ok(mut guard) = self.listings.lock() {
-            if let Some(listing) = guard.iter_mut().find(|l| l.id == listing_id) {
-                *listing = new_listing;
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn delete_listing(&self, listing_id: &str) -> bool {
-        if let Ok(mut guard) = self.listings.lock() {
-            let initial_len = guard.len();
-            guard.retain(|l| l.id != listing_id);
-            return guard.len() < initial_len;
-        }
-        false
-    }
-
-    pub fn get_listings(&self) -> Vec<PropertyListing> {
-        let guard = match this_lock(&self.listings) {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard.clone()
-    }
+    pub async fn delete_listing(&self, listing_id: &str) -> DbResult<bool> { self.delete::<PropertyListing>(listing_id).await }
+    pub async fn get_listings(&self) -> DbResult<Vec<PropertyListing>> { self.all().await }
 }

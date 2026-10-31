@@ -23,8 +23,8 @@ pub fn init_crypto_provider() {
 
 pub fn get_jwt_secret() -> Result<Vec<u8>, String> {
     std::env::var("JWT_SECRET")
-        .map(|s| s.into_bytes())
-        .map_err(|_| "JWT_SECRET environment variable is missing from .env".to_string())
+        .ok().filter(|s| !s.trim().is_empty()).map(String::into_bytes)
+        .ok_or_else(|| "JWT_SECRET environment variable is missing from .env".to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -223,7 +223,7 @@ impl FromRequestParts<AppState> for AuthUser {
             }
         };
 
-        let user = match state.db.get_user(&claims.sub) {
+        let user = match state.db.get_user(&claims.sub).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())? {
             Some(u) => u,
             None => state.db.upsert_user(
                 &claims.sub,
@@ -231,7 +231,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 &claims.email,
                 &claims.role,
                 "jwt",
-            ),
+            ).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())?,
         };
 
         Ok(AuthUser(user))
@@ -293,7 +293,7 @@ impl FromRequestParts<AppState> for AdminUser {
                 .into_response());
         }
 
-        let user = match state.db.get_user(&claims.sub) {
+        let user = match state.db.get_user(&claims.sub).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())? {
             Some(u) => u,
             None => state.db.upsert_user(
                 &claims.sub,
@@ -301,7 +301,7 @@ impl FromRequestParts<AppState> for AdminUser {
                 &claims.email,
                 "admin",
                 "jwt",
-            ),
+            ).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())?,
         };
 
         Ok(AdminUser(user))
