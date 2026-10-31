@@ -161,7 +161,6 @@ export function useAdminLogs() {
   return useQuery({
     queryKey: ["admin", "logs"],
     queryFn: () => fetchJson<{ success: boolean; logs: StreamEventRecord[] }>("/admin/logs"),
-    refetchInterval: 2000,
   });
 }
 
@@ -169,7 +168,6 @@ export function useAdminCallSummaries() {
   return useQuery({
     queryKey: ["admin", "callSummaries"],
     queryFn: () => fetchJson<{ success: boolean; summaries: CallSummaryRecord[] }>("/admin/call-summaries"),
-    refetchInterval: 5000,
   });
 }
 
