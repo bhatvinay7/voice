@@ -41,8 +41,6 @@ pub struct AppConfig {
     pub upstash_vector_rest_url: String,
     pub upstash_vector_rest_token: String,
     pub node_env: String,
-    pub admin_email: String,
-    pub admin_password: String,
     pub jwt_secret: String,
 
     // Neo4j / Graph DB
@@ -285,8 +283,6 @@ impl AppConfig {
             upstash_vector_rest_url: env::var("UPSTASH_VECTOR_REST_URL").or_else(|_| env::var("UPSTASH_VECTOR_URL")).unwrap_or_default(),
             upstash_vector_rest_token: env::var("UPSTASH_VECTOR_REST_TOKEN").or_else(|_| env::var("UPSTASH_VECTOR_TOKEN")).unwrap_or_default(),
             node_env: env::var("NODE_ENV").unwrap_or_default(),
-            admin_email: env::var("ADMIN_EMAIL").unwrap_or_default(),
-            admin_password: env::var("ADMIN_PASSWORD").unwrap_or_default(),
             jwt_secret: env::var("JWT_SECRET").unwrap_or_default(),
             neo4j_uri: env::var("NEO4J_URI").or_else(|_| env::var("MEMGRAPH_URI")).ok().filter(|value| !value.trim().is_empty()),
             neo4j_username: env::var("NEO4J_USERNAME").or_else(|_| env::var("MEMGRAPH_USERNAME")).ok().filter(|value| !value.trim().is_empty()),
@@ -375,7 +371,7 @@ mod environment_tests {
             return;
         }
         let cfg = super::AppConfig::load().unwrap();
-        for value in [cfg.admin_email, cfg.admin_password, cfg.jwt_secret, cfg.postgres_url,
+        for value in [cfg.jwt_secret, cfg.postgres_url,
             cfg.redis_url, cfg.llm_api_key, cfg.llm_model, cfg.agent_system_prompt,
             cfg.domain_fallback_message, cfg.r2_endpoint_url, cfg.app_domain_name] {
             assert!(value.is_empty(), "Missing values must not acquire hardcoded defaults");
