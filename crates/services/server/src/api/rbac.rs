@@ -282,27 +282,22 @@ impl FromRequestParts<AppState> for AdminUser {
             }
         };
 
-        if claims.role != "admin" {
+        let user = match state.db.get_user(&claims.sub).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())? {
+            Some(u) => u,
+            None => return Err((StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Unknown user"}))).into_response()),
+        };
+
+        // Check Neon on every protected request. A role change takes effect
+        // immediately instead of waiting for an old JWT to expire.
+        if user.role != "admin" {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(json!({
                     "success": false,
                     "error": "Forbidden: Administrator role required"
                 })),
-            )
-                .into_response());
+            ).into_response());
         }
-
-        let user = match state.db.get_user(&claims.sub).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())? {
-            Some(u) => u,
-            None => state.db.upsert_user(
-                &claims.sub,
-                "System Administrator",
-                &claims.email,
-                "admin",
-                "jwt",
-            ).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())?,
-        };
 
         Ok(AdminUser(user))
     }

@@ -160,11 +160,6 @@ pub async fn auth_email(
     State(state): State<AppState>,
     Json(payload): Json<EmailLoginReq>,
 ) -> impl IntoResponse {
-    if !state.config.admin_email.is_empty() && payload.email.eq_ignore_ascii_case(&state.config.admin_email) {
-        return super::admin::admin_login(State(state), Json(super::admin::AdminLoginReq {
-            email: payload.email, password: payload.password,
-        })).await.into_response();
-    }
     let user_id = format!("user-{}", payload.email.replace('@', "-").replace('.', "-"));
     let display_name = payload.name.unwrap_or_default();
 
@@ -176,10 +171,6 @@ pub async fn auth_email(
         .map(|u| u.role)
         .unwrap_or_else(|| "user".to_string());
 
-    if existing_role == "admin" {
-        return (axum::http::StatusCode::UNAUTHORIZED,
-            Json(json!({"success": false, "error": "Use the configured administrator login"}))).into_response();
-    }
     let user_profile = db_try!(state.db.upsert_user(
         &user_id,
         &display_name,

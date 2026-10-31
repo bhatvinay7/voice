@@ -13,39 +13,18 @@ pub struct AdminLoginReq {
     pub password: String,
 }
 
-pub(crate) fn valid_admin_credentials(cfg: &config::AppConfig, email: &str, password: &str) -> bool {
-    use hmac::{Hmac, Mac};
-    if cfg.admin_email.is_empty() || cfg.admin_password.is_empty() || !email.eq_ignore_ascii_case(&cfg.admin_email) {
-        return false;
-    }
-    let mut expected = Hmac::<sha2::Sha256>::new_from_slice(cfg.admin_password.as_bytes()).expect("HMAC accepts all key sizes");
-    let mut supplied = Hmac::<sha2::Sha256>::new_from_slice(password.as_bytes()).expect("HMAC accepts all key sizes");
-    expected.update(b"admin-login");
-    supplied.update(b"admin-login");
-    expected.verify_slice(&supplied.finalize().into_bytes()).is_ok()
-}
-
 pub async fn admin_login(
     State(state): State<AppState>,
     Json(payload): Json<AdminLoginReq>,
 ) -> impl IntoResponse {
-    if state.config.admin_email.is_empty() || state.config.admin_password.is_empty() {
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"success": false, "error": "Set ADMIN_EMAIL and ADMIN_PASSWORD in the server environment"}))).into_response();
-    }
-    if !valid_admin_credentials(&state.config, &payload.email, &payload.password) {
-        return (axum::http::StatusCode::UNAUTHORIZED,
-            Json(json!({"success": false, "error": "Invalid administrator credentials"}))).into_response();
-    }
-    let user = match db_try!(state.db.get_user_by_email(&state.config.admin_email)) {
+    // Identity has already been authenticated by the selected login provider.
+    // Authorization comes exclusively from the durable Neon user role.
+    let user = match db_try!(state.db.get_user_by_email(&payload.email)) {
         Some(user) => user,
-        None => {
-            let id = format!("user-{}", state.config.admin_email.replace('@', "-").replace('.', "-"));
-            db_try!(state.db.upsert_user(&id, "", &state.config.admin_email, "admin", "email"))
-        }
+        None => return (axum::http::StatusCode::UNAUTHORIZED,
+            Json(json!({"success": false, "error": "Unknown user"}))).into_response(),
     };
 
-    // 2. Check the role from the database - no hardcoded credentials!
     if user.role != "admin" {
         return (
             axum::http::StatusCode::FORBIDDEN,
@@ -57,7 +36,6 @@ pub async fn admin_login(
             .into_response();
     }
 
-    // 3. Issue cryptographically signed JWT containing role: "admin"
     let token = match create_jwt_token(&user.id, &user.email, &user.role) {
         Ok(t) => t,
         Err(e) => {
