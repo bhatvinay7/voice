@@ -15,8 +15,8 @@ async fn test_config_loader() {
     assert_eq!(cfg.r2_bucket_name, "uae-estate-vault");
 }
 
-#[test]
-fn test_telephony_provider_selection_accepts_supported_env_values() {
+#[tokio::test]
+async fn test_telephony_provider_selection_accepts_supported_env_values() {
     for value in ["twilio", "telnyx", "vonage", "plivo", "sip", "custom"] {
         let provider = TelephonyProvider::parse(value)
             .unwrap_or_else(|error| panic!("{value} should be supported: {error}"));
@@ -29,18 +29,18 @@ fn test_telephony_provider_selection_accepts_supported_env_values() {
 async fn test_idempotency_and_verification_gate() {
     let db = DatabaseStore::new();
 
-    let res_unverified = db.book_viewing_slot("prop-101", "user-unverified", "2026-10-05T10:00:00Z", "idemp-test-1");
+    let res_unverified = db.book_viewing_slot("prop-101", "user-unverified", "2026-10-05T10:00:00Z", "idemp-test-1").await.unwrap();
     assert!(!res_unverified.success);
     assert_eq!(res_unverified.error_code, Some("VERIFICATION_REQUIRED".to_string()));
 
-    let verified_user = db.verify_user_document("user-unverified", "784-1990-1234567-1");
+    let verified_user = db.verify_user_document("user-unverified", "784-1990-1234567-1").await.unwrap();
     assert!(verified_user.is_verified);
 
-    let res_verified = db.book_viewing_slot("prop-101", "user-unverified", "2026-10-05T10:00:00Z", "idemp-test-2");
+    let res_verified = db.book_viewing_slot("prop-101", "user-unverified", "2026-10-05T10:00:00Z", "idemp-test-2").await.unwrap();
     assert!(res_verified.success);
     assert!(res_verified.booking.is_some());
 
-    let res_retry = db.book_viewing_slot("prop-101", "user-unverified", "2026-10-05T10:00:00Z", "idemp-test-2");
+    let res_retry = db.book_viewing_slot("prop-101", "user-unverified", "2026-10-05T10:00:00Z", "idemp-test-2").await.unwrap();
     assert!(res_retry.success);
     if let Some(booking) = res_retry.booking {
         if let Some(original_booking) = res_verified.booking {
@@ -53,7 +53,7 @@ async fn test_idempotency_and_verification_gate() {
 async fn test_admin_graph_node_management() {
     let db = DatabaseStore::new();
 
-    let initial_nodes = db.get_graph_nodes();
+    let initial_nodes = db.get_graph_nodes().await.unwrap();
     assert!(!initial_nodes.is_empty());
 
     let new_node = AdminGraphNode {
@@ -64,9 +64,9 @@ async fn test_admin_graph_node_management() {
         is_preset: false,
     };
 
-    db.add_graph_node(new_node);
+    db.add_graph_node(new_node).await.unwrap();
 
-    let updated_nodes = db.get_graph_nodes();
+    let updated_nodes = db.get_graph_nodes().await.unwrap();
     assert_eq!(updated_nodes.len(), initial_nodes.len() + 1);
 }
 
@@ -91,7 +91,7 @@ async fn test_r2_transcript_dump_and_call_summary() {
     assert_eq!(summary_record.call_id, "call-101");
     assert_eq!(summary_record.qualified_budget_aed, 120000);
 
-    let summaries = db.get_call_summaries();
+    let summaries = db.get_call_summaries().await.unwrap();
     assert_eq!(summaries.len(), 1);
 }
 
@@ -109,7 +109,7 @@ async fn test_upstash_redis_streams_and_db_worker_sync() {
 
     assert!(stream_result.is_ok());
 
-    let guard = db.stream_events.lock();
+    let guard = db.load_recent_stream_events().await;
     if let Ok(events) = guard {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "session-call-101");
@@ -220,21 +220,21 @@ async fn test_english_rag_search() {
     let db = DatabaseStore::new();
     let rag = RAGPipeline::new(db);
 
-    let results_en = rag.search("2-bedroom near metro under 120k in Dubai Marina");
+    let results_en = rag.search("2-bedroom near metro under 120k in Dubai Marina").await.unwrap();
     assert!(!results_en.is_empty());
     assert_eq!(results_en[0].listing.id, "prop-101");
 
-    let results_downtown = rag.search("1-bedroom studio in bay area");
+    let results_downtown = rag.search("1-bedroom studio in bay area").await.unwrap();
     assert!(!results_downtown.is_empty());
     assert_eq!(results_downtown[0].listing.id, "prop-102");
 
     // Dynamic RAG knowledge search (Dubai buying procedure and Golden Visa)
-    let procedure_docs = rag.search_knowledge("what is the procedure and steps to buy property in Dubai Form F");
+    let procedure_docs = rag.search_knowledge("what is the procedure and steps to buy property in Dubai Form F").await.unwrap();
     assert!(!procedure_docs.is_empty(), "RAG must dynamically retrieve Dubai buying procedure");
     assert_eq!(procedure_docs[0].document.id, "doc-dubai-buy-procedure");
     assert!(procedure_docs[0].document.content.contains("Form F (MOU)"));
 
-    let visa_docs = rag.search_knowledge("what is the requirement for 10-year golden visa 2 million AED");
+    let visa_docs = rag.search_knowledge("what is the requirement for 10-year golden visa 2 million AED").await.unwrap();
     assert!(!visa_docs.is_empty(), "RAG must dynamically retrieve Golden Visa knowledge");
     assert_eq!(visa_docs[0].document.id, "doc-uae-golden-visa");
 }
@@ -247,7 +247,7 @@ async fn test_user_auth_bhatvinay74_gmail_com() {
     assert_eq!(password, "12345678", "User credential check");
 
     let user_id = format!("user-{}", email.replace('@', "-").replace('.', "-"));
-    let user_profile = db.verify_user_document(&user_id, "784-1995-8765432-1");
+    let user_profile = db.verify_user_document(&user_id, "784-1995-8765432-1").await.unwrap();
 
     assert_eq!(user_profile.id, user_id);
     assert!(user_profile.is_verified);
@@ -269,15 +269,15 @@ async fn test_tenancy_contract_parser_and_review_workflow() {
         4,
         90,
         0.78, // Low confidence -> trigger review
-    );
+    ).await.unwrap();
 
     assert!(contract.needs_human_review);
     assert_eq!(contract.status, "pending_review");
 
-    let queue = db.get_contract_review_queue();
+    let queue = db.get_contract_review_queue().await.unwrap();
     assert!(queue.iter().any(|c| c.id == contract.id));
 
-    let approved = db.approve_contract_review(&contract.id);
+    let approved = db.approve_contract_review(&contract.id).await.unwrap();
     assert!(approved.is_some());
 
     let approved_contract = approved.unwrap();
@@ -292,16 +292,16 @@ async fn test_outbox_email_sms_notification_worker() {
     let slot_time = "2026-10-15T14:00:00Z";
     let idempotency_key = "idemp-outbox-test-1";
 
-    let res = db.book_viewing_slot("prop-101", user_id, slot_time, idempotency_key);
+    let res = db.book_viewing_slot("prop-101", user_id, slot_time, idempotency_key).await.unwrap();
     assert!(res.success);
 
-    let pending_notifications = db.get_outbox_notifications();
+    let pending_notifications = db.get_outbox_notifications().await.unwrap();
     assert!(pending_notifications.len() >= 2);
 
-    let processed = db.process_outbox_notifications();
+    let processed = db.process_outbox_notifications().await.unwrap();
     assert!(processed >= 2);
 
-    let after_process = db.get_outbox_notifications();
+    let after_process = db.get_outbox_notifications().await.unwrap();
     assert!(after_process.iter().all(|n| n.status == "sent"));
 }
 

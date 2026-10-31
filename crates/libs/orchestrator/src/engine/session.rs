@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct SessionActor {
     pub session_id: String,
+    pub user_id: String,
     pub run_id: RunId,
     pub tasks: HashMap<TaskId, TaskStateRecord>,
     pub db_tasks: HashMap<TaskId, (usize, PendingDbAction)>,
@@ -15,6 +16,7 @@ pub struct SessionActor {
     pub agent_tx: Option<mpsc::Sender<AgentCmd>>,
     pub sts_tx: Option<mpsc::Sender<StsPipelineCmd>>,
     pub s3_dump_tx: Option<mpsc::Sender<S3DumpData>>,
+    pub conversation_tx: tokio::sync::broadcast::Sender<ConversationEvent>,
     pub tts_audio_tx: Option<mpsc::Sender<TtsAudioPacket>>,
     pub audio_broadcast_tx: tokio::sync::broadcast::Sender<(String, Vec<u8>)>,
     pub ai_listen_muted: bool,
@@ -24,14 +26,50 @@ pub struct SessionActor {
 }
 
 impl SessionActor {
+    pub fn publish_conversation(&self, event_type: impl Into<String>, payload_json: String) {
+        let event = ConversationEvent {
+            session_id: self.session_id.clone(),
+            trace_id: format!("trace-{}", chrono::Utc::now().timestamp_millis()),
+            event_type: event_type.into(),
+            payload_json,
+        };
+        if let Err(error) = self.conversation_tx.send(event) {
+            tracing::warn!(%self.session_id, %error, "Conversation fanout has no active subscribers");
+        }
+    }
+
     pub fn new(session_id: String, orch: Orchestrator) -> Self {
         let run_id = RunId(format!("run-{}", session_id));
+        let (conversation_tx, _) = tokio::sync::broadcast::channel::<ConversationEvent>(256);
         let agent_tx = (orch.agent_factory)(run_id.clone(), orch.queue_tx.clone());
 
         let (s3_tx, s3_rx) = mpsc::channel(1_000);
         let s_id = session_id.clone();
         tokio::spawn(async move {
             crate::supervisors::run_s3_dump_pipeline(s_id, s3_rx).await;
+        });
+
+        let s3_conversation_tx = s3_tx.clone();
+        let s3_conversation_rx = conversation_tx.subscribe();
+        let s3_conversation_session = session_id.clone();
+        tokio::spawn(async move {
+            crate::supervisors::run_s3_conversation_fanout(
+                s3_conversation_session, s3_conversation_rx, s3_conversation_tx,
+            ).await;
+        });
+
+        let redis_conversation_rx = conversation_tx.subscribe();
+        let redis_conversation_session = session_id.clone();
+        let redis_db = orch.db.clone();
+        tokio::spawn(async move {
+            crate::supervisors::run_redis_conversation_fanout(
+                redis_conversation_session, redis_conversation_rx, redis_db,
+            ).await;
+        });
+
+        let _ = agent_tx.try_send(AgentCmd::SetConversationFanout {
+            run_id: run_id.clone(),
+            conversation_tx: conversation_tx.clone(),
         });
 
         let (tts_audio_tx, tts_audio_rx) = mpsc::channel(256);
@@ -110,12 +148,14 @@ impl SessionActor {
         Self {
             run_id,
             session_id,
+            user_id: String::new(),
             tasks: HashMap::new(),
             db_tasks: HashMap::new(),
             workflow_graph: None,
             agent_tx: Some(agent_tx),
             sts_tx,
             s3_dump_tx: Some(s3_tx),
+            conversation_tx,
             tts_audio_tx: Some(tts_audio_tx),
             audio_broadcast_tx,
             ai_listen_muted: false,

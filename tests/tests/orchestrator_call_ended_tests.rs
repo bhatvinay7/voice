@@ -74,7 +74,7 @@ async fn test_orchestrator_multiturn_cached_context_qa() {
     // Wait for initial search and RAG caching to resolve
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(events) = db.stream_events.lock() {
+        if let Ok(events) = db.load_recent_stream_events().await {
             if events
                 .iter()
                 .any(|e| e.session_id.contains(&session_id) && e.event_type == "LLM_RESPONSE")
@@ -113,7 +113,7 @@ async fn test_orchestrator_multiturn_cached_context_qa() {
 
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(events) = db.stream_events.lock() {
+        if let Ok(events) = db.load_recent_stream_events().await {
             for event in events.iter() {
                 if event.session_id.contains(&session_id) && event.event_type == "LLM_RESPONSE" {
                     if event.payload_json.contains("rent") || event.payload_json.contains("115000")
@@ -226,7 +226,7 @@ async fn test_orchestrator_call_ended_saves_text_and_audio_presigned_urls_to_db(
 
     // 6. Verify text and audio presigned URLs are saved in db.call_endpoints
     let endpoint_record = db
-        .get_call_endpoints(&session_id)
+        .get_call_endpoints(&session_id).await.unwrap()
         .expect("CallEndpointsRecord must be saved to DB when call is ended");
 
     assert_eq!(endpoint_record.session_id, session_id);
@@ -245,7 +245,7 @@ async fn test_orchestrator_call_ended_saves_text_and_audio_presigned_urls_to_db(
 
     // 7. Verify text and audio presigned URLs are also saved in db.call_summaries
     let summary_record = db
-        .get_call_summary(&session_id)
+        .get_call_summary(&session_id).await.unwrap()
         .expect("CallSummaryRecord must be saved to DB when call is ended");
 
     assert_eq!(summary_record.call_id, session_id);
@@ -260,8 +260,7 @@ async fn test_orchestrator_call_ended_saves_text_and_audio_presigned_urls_to_db(
     );
 
     // 8. Verify Redis stream event SESSION_ENDED is also recorded
-    let stream_events = db.stream_events.clone();
-    if let Ok(events) = stream_events.lock() {
+    if let Ok(events) = db.load_recent_stream_events().await {
         let has_ended_event = events
             .iter()
             .any(|e| e.session_id == session_id && e.event_type == "SESSION_ENDED");
@@ -293,7 +292,7 @@ async fn test_db_store_call_ended_presigned_urls_persistence() {
     );
 
     // Persist call endpoints on call end
-    db.save_call_endpoints(&session_id, &audio_presigned, &text_presigned);
+    db.save_call_endpoints(&session_id, &audio_presigned, &text_presigned).await.unwrap();
     db.save_call_summary(
         &session_id,
         &user_id,
@@ -303,11 +302,11 @@ async fn test_db_store_call_ended_presigned_urls_persistence() {
         "AI Summary: Client verified and ready for contract signing.",
         250000,
         "Downtown Dubai",
-    );
+    ).await.unwrap();
 
     // 1. Verify get_call_endpoints retrieves exact text and audio presigned URLs
     let endpoints = db
-        .get_call_endpoints(&session_id)
+        .get_call_endpoints(&session_id).await.unwrap()
         .expect("Must retrieve call endpoints for ended session");
     assert_eq!(endpoints.session_id, session_id);
     assert_eq!(endpoints.audio_url, audio_presigned);
@@ -317,7 +316,7 @@ async fn test_db_store_call_ended_presigned_urls_persistence() {
 
     // 2. Verify get_call_summary retrieves exact text and audio presigned URLs
     let summary = db
-        .get_call_summary(&session_id)
+        .get_call_summary(&session_id).await.unwrap()
         .expect("Must retrieve call summary for ended session");
     assert_eq!(summary.call_id, session_id);
     assert_eq!(summary.user_id, user_id);
@@ -328,6 +327,6 @@ async fn test_db_store_call_ended_presigned_urls_persistence() {
     assert_eq!(summary.preferred_location, "Downtown Dubai");
 
     // 3. Verify get_all_call_endpoints contains the ended session
-    let all_endpoints = db.get_all_call_endpoints();
+    let all_endpoints = db.get_all_call_endpoints().await.unwrap();
     assert!(all_endpoints.iter().any(|ep| ep.session_id == session_id));
 }

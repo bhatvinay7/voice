@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let db = db::DatabaseStore::new();
+    db.initialize().await.expect("Neon database unavailable or migrations missing");
     let tool_service = scheduler::tool_service::ToolExecutionServiceImpl { db };
 
     Server::builder()

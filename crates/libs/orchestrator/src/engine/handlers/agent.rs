@@ -47,20 +47,8 @@ impl SessionActor {
                     graph.status = "Completed".to_string();
                 }
 
-                if let Some(s3_tx) = &self.s3_dump_tx {
-                    if s3_tx
-                        .try_send(S3DumpData::Text {
-                            session_id: run_id.call_id().to_string(),
-                            payload: format!("agent_response: {}", result),
-                        })
-                        .is_err()
-                    {
-                        tracing::trace!(
-                            "Session {} recording text queue full; dropping agent response copy",
-                            run_id.0
-                        );
-                    }
-                }
+                // The agent emitted this response through the session conversation broadcast
+                // before it reported completion. S3 and Redis therefore receive one event.
 
                 if let Some(sts_tx) = &self.sts_tx {
                     let _ = sts_tx

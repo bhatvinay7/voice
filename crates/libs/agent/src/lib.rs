@@ -3,7 +3,7 @@ pub mod models_checker;
 
 use cache::AgentContextReasoner;
 use db::DatabaseStore;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt};
 pub use models_checker::{ModelCheckStatus, ModelChecker, SystemModelsVerificationReport};
 use orchestrator::{AgentCmd, AgentEvent, QueueEvent, RunId, TaskId};
 use pubsub::{PubSubBus, SystemEvent};
@@ -11,7 +11,8 @@ use rag::RAGPipeline;
 use serde_json::json;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
+use tokio_util::time::DelayQueue;
 
 pub struct LlmAgentActor {
     pub run_id: RunId,
@@ -23,6 +24,42 @@ pub struct LlmAgentActor {
     pub session_history: Vec<String>,
     pub cached_listings: Vec<db::PropertyListing>,
     pub active_listing_id: Option<String>,
+    pub conversation_tx: Option<broadcast::Sender<orchestrator::ConversationEvent>>,
+    pub last_redis_transcript: String,
+}
+
+struct RedisConversationResult {
+    transcript: Result<Option<String>, String>,
+}
+
+/// One Redis polling connection per agent session. The actor never blocks on a
+/// network read: it only sends requests and receives results through MPSC.
+async fn run_agent_redis_poller(
+    db: DatabaseStore,
+    requests: &mut mpsc::Receiver<String>,
+    results: mpsc::Sender<RedisConversationResult>,
+) {
+    let mut connection = None;
+    while let Some(session_id) = requests.recv().await {
+        if connection.is_none() {
+            connection = db.open_redis_poll_connection().await.ok();
+        }
+        let transcript = match AssertUnwindSafe(async {
+            match connection.as_mut() {
+                Some(connection) => db.load_redis_conversation_on(&session_id, connection).await,
+                None => Err("Agent Redis polling connection unavailable".to_string()),
+            }
+        }).catch_unwind().await {
+            Ok(result) => result,
+            Err(_) => Err("Agent Redis polling worker panicked".to_string()),
+        };
+        if transcript.is_err() {
+            connection = None;
+        }
+        if results.send(RedisConversationResult { transcript }).await.is_err() {
+            break;
+        }
+    }
 }
 
 impl LlmAgentActor {
@@ -43,6 +80,8 @@ impl LlmAgentActor {
             session_history: Vec::new(),
             cached_listings: Vec::new(),
             active_listing_id: None,
+            conversation_tx: None,
+            last_redis_transcript: String::new(),
         }
     }
 
@@ -111,17 +150,23 @@ impl LlmAgentActor {
         user_prompt: &str,
     ) -> Option<String> {
         let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
-        let api_key = if !cfg.decision_llm_api_key.is_empty() {
+        let api_key = if !cfg.fast_model_api_key.is_empty() {
+            &cfg.fast_model_api_key
+        } else if !cfg.decision_llm_api_key.is_empty() {
             &cfg.decision_llm_api_key
         } else {
             &cfg.llm_api_key
         };
-        let endpoint = if !cfg.decision_llm_endpoint_url.is_empty() {
+        let endpoint = if !cfg.fast_model_endpoint_url.is_empty() {
+            &cfg.fast_model_endpoint_url
+        } else if !cfg.decision_llm_endpoint_url.is_empty() {
             &cfg.decision_llm_endpoint_url
         } else {
             &cfg.llm_endpoint_url
         };
-        let model = if !cfg.decision_llm_model.is_empty() {
+        let model = if !cfg.fast_model.is_empty() {
+            &cfg.fast_model
+        } else if !cfg.decision_llm_model.is_empty() {
             &cfg.decision_llm_model
         } else {
             &cfg.llm_model
@@ -163,27 +208,68 @@ impl LlmAgentActor {
     }
 
     pub async fn run_agent_loop(mut rx: mpsc::Receiver<AgentCmd>, mut actor: LlmAgentActor) {
+        let mut redis_refreshes = DelayQueue::new();
+        let (redis_request_tx, mut redis_request_rx) = mpsc::channel::<String>(8);
+        let (redis_result_tx, mut redis_result_rx) = mpsc::channel::<RedisConversationResult>(8);
+        let redis_db = actor.db.clone();
+        tokio::spawn(async move {
+            run_agent_redis_poller(redis_db, &mut redis_request_rx, redis_result_tx).await;
+        });
         loop {
-            let fut = AssertUnwindSafe(async {
-                while let Some(cmd) = rx.recv().await {
-                    actor.handle_command(cmd).await;
+            tokio::select! {
+                Some(cmd) = rx.recv() => {
+                    let installs_fanout = matches!(cmd, AgentCmd::SetConversationFanout { .. });
+                    let fut = AssertUnwindSafe(actor.handle_command(cmd));
+                    if fut.catch_unwind().await.is_err() {
+                        eprintln!("[LlmAgentActor {}] Command panicked; actor continues", actor.run_id.0);
+                    } else if installs_fanout {
+                        redis_refreshes.insert((), std::time::Duration::from_secs(2));
+                    }
                 }
-            });
-
-            if let Err(_) = fut.catch_unwind().await {
-                eprintln!(
-                    "[LlmAgentActor {}] Panic intercepted! Actor loop restarting.",
-                    actor.run_id.0
-                );
-            } else {
-                break; // Normal shutdown when channel closes
+                Some(_) = redis_refreshes.next(), if actor.conversation_tx.is_some() => {
+                    // A full queue means a refresh is already pending, so coalesce it.
+                    let _ = redis_request_tx.try_send(actor.run_id.call_id().to_string());
+                    redis_refreshes.insert((), std::time::Duration::from_secs(2));
+                }
+                Some(result) = redis_result_rx.recv() => actor.accept_redis_conversation(result),
+                else => break,
             }
         }
         println!("[LlmAgentActor {}] Shutdown.", actor.run_id.0);
     }
 
+    fn accept_redis_conversation(&mut self, result: RedisConversationResult) {
+        match result.transcript {
+            Ok(Some(transcript)) if transcript != self.last_redis_transcript => {
+                self.last_redis_transcript = transcript.clone();
+                self.session_history.push(format!("[REDIS_CONVERSATION]: {transcript}"));
+            }
+            Ok(_) => {}
+            Err(error) => tracing::debug!(%error, run = %self.run_id.0, "Agent Redis refresh deferred"),
+        }
+    }
+
+    async fn publish_assistant_conversation(&self, event_type: &str, payload_json: String) {
+        if let Some(tx) = &self.conversation_tx {
+            let _ = tx.send(orchestrator::ConversationEvent {
+                session_id: self.run_id.call_id().to_string(),
+                trace_id: format!("trace-{}", chrono::Utc::now().timestamp_millis()),
+                event_type: event_type.to_string(),
+                payload_json,
+            });
+        } else {
+            let _ = self.db.push_redis_stream(
+                "stream:conversation", self.run_id.call_id(),
+                &format!("trace-{}", chrono::Utc::now().timestamp_millis()), event_type, &payload_json,
+            ).await;
+        }
+    }
+
     pub async fn handle_command(&mut self, cmd: AgentCmd) {
         match cmd {
+            AgentCmd::SetConversationFanout { run_id, conversation_tx } => {
+                if run_id == self.run_id { self.conversation_tx = Some(conversation_tx); }
+            }
             AgentCmd::Start { run_id, input } => {
                 if run_id != self.run_id {
                     return;
@@ -226,7 +312,7 @@ impl LlmAgentActor {
             }
 
             AgentCmd::UserInput {
-                run_id, text, role, ..
+                run_id, user_id, text, role
             } => {
                 if run_id != self.run_id {
                     return;
@@ -238,16 +324,14 @@ impl LlmAgentActor {
 
                 let trace_id = format!("trace-{}", chrono::Utc::now().timestamp_millis());
 
-                let _ = self
-                    .db
-                    .push_redis_stream(
-                        "stream:conversation",
-                        run_id.call_id(),
-                        &trace_id,
-                        "USER_PROMPT",
+                // Session actors already broadcast user input to S3 and Redis. Directly
+                // constructed agents (tests or tools) retain durable persistence here.
+                if self.conversation_tx.is_none() {
+                    let _ = self.db.push_redis_stream(
+                        "stream:conversation", run_id.call_id(), &trace_id, "USER_PROMPT",
                         &json!({ "text": text, "role": role }).to_string(),
-                    )
-                    .await;
+                    ).await;
+                }
 
                 self.session_history.push(text.clone());
 
@@ -264,13 +348,9 @@ impl LlmAgentActor {
                     if let Some(cached_response) = self.answer_from_cached_context(&text) {
                         println!("[LlmAgentActor] Answering follow-up question directly from cached property context for run {}", run_id.0);
 
-                        let _ = self.db.push_redis_stream(
-                            "stream:conversation",
-                            run_id.call_id(),
-                            &trace_id,
-                            "LLM_RESPONSE",
-                            &json!({ "response_text": cached_response, "source": "session_cache" }).to_string(),
-                        ).await;
+                        self.publish_assistant_conversation("LLM_RESPONSE", json!({
+                            "response_text": cached_response, "source": "session_cache"
+                        }).to_string()).await;
 
                         let _ = self.pubsub.publish(SystemEvent::VoiceTtsStream {
                             call_id: run_id.call_id().to_string(),
@@ -314,13 +394,9 @@ impl LlmAgentActor {
                             if let Some(edge_response) = llm_reply {
                                 println!("[LlmAgentActor] Fast pluggable model answered edge question from active property context for run {}", run_id.0);
 
-                                let _ = self.db.push_redis_stream(
-                                    "stream:conversation",
-                                    run_id.call_id(),
-                                    &trace_id,
-                                    "LLM_RESPONSE",
-                                    &json!({ "response_text": edge_response, "source": "llm_cached_context" }).to_string(),
-                                ).await;
+                                self.publish_assistant_conversation("LLM_RESPONSE", json!({
+                                    "response_text": edge_response, "source": "llm_cached_context"
+                                }).to_string()).await;
 
                                 let _ = self.pubsub.publish(SystemEvent::VoiceTtsStream {
                                     call_id: run_id.call_id().to_string(),
@@ -361,7 +437,7 @@ impl LlmAgentActor {
                         })
                         .map(|l| l.id.as_str())
                         .or_else(|| self.get_active_listing().map(|l| l.id.as_str()))
-                        .unwrap_or("prop-101");
+                        .unwrap_or_default();
 
                     let _ = self
                         .orch_tx
@@ -371,8 +447,8 @@ impl LlmAgentActor {
                             tool_name: "book_viewing_slot".to_string(),
                             args: json!({
                                 "listing_id": listing_id,
-                                "user_id": "user-unverified",
-                                "slot_time": "2026-10-05T10:00:00Z"
+                                "user_id": user_id,
+                                "slot_time": self.get_active_listing().and_then(|l| l.available_slots.first()).map(String::as_str).unwrap_or_default()
                             }),
                         }))
                         .await;
@@ -397,8 +473,6 @@ impl LlmAgentActor {
                 if run_id != self.run_id {
                     return;
                 }
-                let trace_id = format!("trace-{}", chrono::Utc::now().timestamp_millis());
-
                 match outcome {
                     Ok(result_value) => {
                         // Cache listings returned from RAG property search
@@ -425,17 +499,9 @@ impl LlmAgentActor {
                             .unwrap_or("Action completed successfully.")
                             .to_string();
 
-                        let _ = self
-                            .db
-                            .push_redis_stream(
-                                "stream:conversation",
-                                run_id.call_id(),
-                                &trace_id,
-                                "LLM_RESPONSE",
-                                &json!({ "response_text": speech_text, "task_id": task_id.0 })
-                                    .to_string(),
-                            )
-                            .await;
+                        self.publish_assistant_conversation("LLM_RESPONSE", json!({
+                            "response_text": speech_text, "task_id": task_id.0,
+                        }).to_string()).await;
 
                         let _ = self.pubsub.publish(SystemEvent::VoiceTtsStream {
                             call_id: run_id.call_id().to_string(),

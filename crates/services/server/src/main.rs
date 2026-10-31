@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = AppConfig::load().expect("Failed to load environment variables");
     let db = DatabaseStore::new();
+    db.initialize().await.expect("Neon database unavailable or migrations missing");
     let pubsub = create_shared_bus(100);
 
     // 1. Start Upstash Redis Streams -> PostgreSQL Async Worker Group
@@ -38,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Set up missing channels for Orchestrator
     let scheduler_endpoint_str = std::env::var("SCHEDULER_ENDPOINT")
-        .unwrap_or_else(|_| "http://[::1]:50051".to_string());
+        .unwrap_or_default();
     let channel = tonic::transport::Endpoint::from_shared(scheduler_endpoint_str)
         .expect("Invalid SCHEDULER_ENDPOINT")
         .connect_lazy();
@@ -65,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(graph) => {
                 tracing::info!("[GraphDB] Connected to Neo4j at {}", uri);
                 // Push workflow DAG on startup
-                let workflow_nodes = db::store::seed_data::get_default_graph_nodes();
+                let workflow_nodes = db.get_graph_nodes().await?;
                 match db::push_workflow_dag_to_graph(&graph, &workflow_nodes).await {
                     Ok(_) => tracing::info!("[GraphDB] Pushed {} workflow nodes to Graph DB", workflow_nodes.len()),
                     Err(e) => tracing::warn!("[GraphDB] Could not push workflow DAG: {}", e),
@@ -73,12 +74,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(graph)
             }
             Err(e) => {
-                tracing::warn!("[GraphDB] Could not connect to Neo4j ({}). Falling back to in-memory store.", e);
+                tracing::warn!("[GraphDB] Could not connect to Neo4j ({}). Using Neon workflow storage.", e);
                 None
             }
         }
     } else {
-        tracing::info!("[GraphDB] Neo4j credentials not set in .env. Using in-memory store only.");
+        tracing::info!("[GraphDB] Neo4j credentials not set in .env. Using Neon workflow storage.");
         None
     };
 
@@ -119,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start Cell Connection Manager
     let scheduler_endpoint = std::env::var("SCHEDULER_ENDPOINT")
-        .unwrap_or_else(|_| "http://[::1]:50051".to_string());
+        .unwrap_or_default();
     let cell_id = std::env::var("POD_NAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "cell-dev-1".to_string());
     let conn_mgr = orchestrator::connection::ConnectionManager::new(
         cell_id, scheduler_endpoint, orch_tx.clone(), slots.clone()

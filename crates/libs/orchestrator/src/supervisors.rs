@@ -1,10 +1,74 @@
-use crate::models::{S3DumpData, StsPipelineCmd, StsPipelineEvent, TtsAudioPacket, WebRtcAudioChunk};
+use crate::models::{ConversationEvent, S3DumpData, StsPipelineCmd, StsPipelineEvent, TtsAudioPacket, WebRtcAudioChunk};
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 
 const WAV_OUTPUT_BYTES_PER_SECOND: u64 = 16_000 * 2 * 2;
+
+/// Per-session S3 subscriber. A lag only drops its own copy; it cannot block Redis
+/// delivery or the live agent. The recording pipeline receives a final transcript copy.
+pub async fn run_s3_conversation_fanout(
+    session_id: String,
+    mut rx: broadcast::Receiver<ConversationEvent>,
+    s3_tx: mpsc::Sender<S3DumpData>,
+) {
+    loop {
+        let fut = AssertUnwindSafe(async {
+            loop {
+                match rx.recv().await {
+                    Ok(event) if event.session_id == session_id => {
+                        let payload = format!("{}: {}", event.event_type, event.payload_json);
+                        if let Err(error) = s3_tx.send(S3DumpData::Text { session_id: session_id.clone(), payload }).await {
+                            warn!(%session_id, %error, "S3 conversation subscriber stopped");
+                            return;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(%session_id, skipped, "S3 conversation subscriber lagged; durable Neon event is retained");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        if let Err(panic) = fut.catch_unwind().await {
+            error!(%session_id, ?panic, "S3 conversation subscriber panicked; restarting");
+        } else { return; }
+    }
+}
+
+/// Per-session Redis subscriber. It appends only to the session-named Redis stream;
+/// the conversation worker later fetches that same stream and writes Neon.
+pub async fn run_redis_conversation_fanout(
+    session_id: String,
+    mut rx: broadcast::Receiver<ConversationEvent>,
+    db: db::DatabaseStore,
+) {
+    loop {
+        let fut = AssertUnwindSafe(async {
+            loop {
+                match rx.recv().await {
+                    Ok(event) if event.session_id == session_id => {
+                        if let Err(error) = db.append_conversation_to_redis(
+                            &event.session_id, &event.trace_id, &event.event_type, &event.payload_json,
+                        ).await {
+                            warn!(%session_id, %error, "Conversation Redis append failed; broadcast subscriber will continue");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(%session_id, skipped, "Redis subscriber lagged; missing records are recovered from Neon outbox");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        if let Err(panic) = fut.catch_unwind().await {
+            error!(%session_id, ?panic, "Redis conversation subscriber panicked; restarting");
+        } else { return; }
+    }
+}
 
 pub async fn run_tts_audio_packet_pipeline(
     session_id: String,
@@ -97,6 +161,7 @@ pub async fn run_s3_dump_pipeline(session_id: String, mut rx: mpsc::Receiver<S3D
             None
         }
     };
+    let mut transcript = String::new();
     let mut audio_chunks = Vec::new();
     let mut audio_bytes = 0usize;
     let mut recording_limit_reached = false;
@@ -116,11 +181,10 @@ pub async fn run_s3_dump_pipeline(session_id: String, mut rx: mpsc::Receiver<S3D
                         session_id: event_session,
                         payload,
                     } => {
-                        info!(
-                            "[S3 Dump Supervisor {}] Received conversation text ({} bytes)",
-                            event_session,
-                            payload.len()
-                        );
+                        if event_session == session_id && transcript.len().saturating_add(payload.len() + 1) <= max_audio_bytes {
+                            transcript.push_str(&payload);
+                            transcript.push('\n');
+                        }
                     }
                     audio @ S3DumpData::Audio { .. } => {
                         let (chunk_bytes, elapsed_samples) = match &audio {
@@ -157,8 +221,11 @@ pub async fn run_s3_dump_pipeline(session_id: String, mut rx: mpsc::Receiver<S3D
                                 crate::r2_storage::build_conversation_wav(&mut audio_chunks),
                             ) {
                                 (Some(cfg), Ok(wav)) => {
-                                    crate::r2_storage::upload_conversation(cfg, &session_id, &wav)
-                                        .await
+                                    let (audio, text) = tokio::join!(
+                                        crate::r2_storage::upload_conversation(cfg, &session_id, &wav),
+                                        crate::r2_storage::upload_transcript(cfg, &session_id, &transcript),
+                                    );
+                                    audio.and_then(|audio| text.map(|text| (audio, text)))
                                 }
                                 (None, _) => Err(
                                     "R2 recording configuration is unavailable; check the server logs for the missing setting"

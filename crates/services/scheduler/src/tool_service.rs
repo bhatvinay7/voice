@@ -31,8 +31,8 @@ impl ToolExecutionService for ToolExecutionServiceImpl {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let rag = rag::RAGPipeline::new(self.db.clone());
-                let knowledge_matches = rag.search_knowledge(query);
-                let results = rag.search(query);
+                let knowledge_matches = rag.search_knowledge(query).await.map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
+                let results = rag.search(query).await.map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
                 let cfg =
                     config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
 
@@ -92,19 +92,19 @@ impl ToolExecutionService for ToolExecutionServiceImpl {
                 let listing_id = args
                     .get("listing_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("prop-101");
+                    .unwrap_or_default();
                 let user_id = args
                     .get("user_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("user-unverified");
+                    .unwrap_or_default();
                 let slot_time = args
                     .get("slot_time")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("2026-10-05T10:00:00Z");
+                    .unwrap_or_default();
                 let idemp = format!("idemp-{}", req.task_id);
                 let res = self
                     .db
-                    .book_viewing_slot(listing_id, user_id, slot_time, &idemp);
+                    .book_viewing_slot(listing_id, user_id, slot_time, &idemp).await.map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
                 let msg = if res.success {
                     format!(
                         "Your viewing slot for property {} has been booked successfully for {}.",

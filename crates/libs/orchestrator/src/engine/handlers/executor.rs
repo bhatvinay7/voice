@@ -63,7 +63,7 @@ pub async fn execute_tool(
                 e.code(),
                 tool_name
             );
-            let output_val = execute_in_process_tool(&db_local, &tool_name, &args, &task_id.0);
+            let output_val = execute_in_process_tool(&db_local, &tool_name, &args, &task_id.0).await;
             let _ = q_tx
                 .send(QueueEvent::Tool(ToolEvent::Done {
                     task_id,
@@ -76,7 +76,7 @@ pub async fn execute_tool(
 }
 
 /// Fallback in-process execution for local operations
-pub fn execute_in_process_tool(
+pub async fn execute_in_process_tool(
     db_local: &DatabaseStore,
     tool_name: &str,
     args: &serde_json::Value,
@@ -87,17 +87,17 @@ pub fn execute_in_process_tool(
             let listing_id = args
                 .get("listing_id")
                 .and_then(|v| v.as_str())
-                .unwrap_or("prop-101");
+                .unwrap_or_default();
             let user_id = args
                 .get("user_id")
                 .and_then(|v| v.as_str())
-                .unwrap_or("user-unverified");
+                .unwrap_or_default();
             let slot_time = args
                 .get("slot_time")
                 .and_then(|v| v.as_str())
-                .unwrap_or("2026-10-05T10:00:00Z");
+                .unwrap_or_default();
             let idemp = format!("idemp-{}", task_id_str);
-            let res = db_local.book_viewing_slot(listing_id, user_id, slot_time, &idemp);
+            let res = match db_local.book_viewing_slot(listing_id, user_id, slot_time, &idemp).await { Ok(value) => value, Err(_) => return serde_json::json!({"success": false, "response_text": "Database unavailable"}) };
             let msg = if res.success {
                 format!(
                     "Your viewing slot for property {} has been booked successfully for {}.",
@@ -123,8 +123,8 @@ pub fn execute_in_process_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let rag = rag::RAGPipeline::new(db_local.clone());
-            let knowledge_matches = rag.search_knowledge(query);
-            let results = rag.search(query);
+            let knowledge_matches = match rag.search_knowledge(query).await { Ok(value) => value, Err(_) => return serde_json::json!({"success": false, "response_text": "Database unavailable"}) };
+            let results = match rag.search(query).await { Ok(value) => value, Err(_) => return serde_json::json!({"success": false, "response_text": "Database unavailable"}) };
             let cfg =
                 config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
 

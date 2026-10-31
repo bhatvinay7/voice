@@ -166,10 +166,20 @@ fn resample_mono(samples: &[i16], source_rate: u32, target_rate: u32, output_len
         .collect()
 }
 
-pub async fn upload_conversation(
+pub async fn upload_conversation(cfg: &AppConfig, session_id: &str, wav: &[u8]) -> Result<String, String> {
+    upload_object(cfg, session_id, wav, "conversation.wav", "audio/wav").await
+}
+
+pub async fn upload_transcript(cfg: &AppConfig, session_id: &str, transcript: &str) -> Result<String, String> {
+    upload_object(cfg, session_id, transcript.as_bytes(), "transcript.txt", "text/plain; charset=utf-8").await
+}
+
+async fn upload_object(
     cfg: &AppConfig,
     session_id: &str,
-    wav: &[u8],
+    payload: &[u8],
+    filename: &str,
+    content_type: &str,
 ) -> Result<String, String> {
     let call_key: String = session_id
         .chars()
@@ -182,7 +192,7 @@ pub async fn upload_conversation(
     }
 
     let origin = r2_origin_url(cfg);
-    let object_key = format!("calls/{}/conversation.wav", call_key);
+    let object_key = format!("calls/{}/{}", call_key, filename);
     let encoded_key = percent_encode(object_key.as_bytes(), true);
     let encoded_bucket = percent_encode(cfg.r2_bucket_name.as_bytes(), false);
     let url = format!("{}/{}/{}", origin, encoded_bucket, encoded_key);
@@ -200,12 +210,12 @@ pub async fn upload_conversation(
     let now = chrono::Utc::now();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = now.format("%Y%m%d").to_string();
-    let payload_hash = sha256_hex(wav);
+    let payload_hash = sha256_hex(payload);
     let canonical_uri = parsed_url.path();
     let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
     let canonical_headers = format!(
-        "content-type:audio/wav\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
-        host, payload_hash, amz_date
+        "content-type:{}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        content_type, host, payload_hash, amz_date
     );
     let canonical_request = format!(
         "PUT\n{}\n\n{}\n{}\n{}",
@@ -229,12 +239,13 @@ pub async fn upload_conversation(
 
     let response = reqwest::Client::new()
         .put(parsed_url)
-        .header(reqwest::header::CONTENT_TYPE, "audio/wav")
+        .header(reqwest::header::CONTENT_TYPE, content_type)
         .header("host", host)
         .header("x-amz-content-sha256", payload_hash)
         .header("x-amz-date", amz_date.clone())
         .header("authorization", authorization)
-        .body(wav.to_vec())
+        .body(payload.to_vec())
+        .timeout(std::time::Duration::from_secs(45))
         .send()
         .await
         .map_err(|error| format!("R2 upload request failed: {}", error))?;

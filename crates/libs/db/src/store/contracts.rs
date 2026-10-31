@@ -1,10 +1,10 @@
 use crate::models::{OutboxNotification, TenancyContract};
 use chrono::Utc;
 use uuid::Uuid;
-use super::{this_lock, DatabaseStore};
+use super::{DatabaseStore, DbResult, postgres::error};
 
 impl DatabaseStore {
-    pub fn upload_tenancy_contract(
+    pub async fn upload_tenancy_contract(
         &self,
         agent_id: &str,
         filename: &str,
@@ -16,7 +16,7 @@ impl DatabaseStore {
         cheques_count: u8,
         notice_period_days: u16,
         confidence_score: f32,
-    ) -> TenancyContract {
+    ) -> DbResult<TenancyContract> {
         let contract_id = format!("contract-{}", Uuid::new_v4());
         let r2_path = self.generate_r2_vault_path(agent_id, "contracts", filename);
         let needs_human_review = confidence_score < 0.85;
@@ -48,67 +48,19 @@ impl DatabaseStore {
             created_at: Utc::now().to_rfc3339(),
         };
 
-        if let Ok(mut guard) = self.contracts.lock() {
-            guard.push(contract.clone());
-        }
-
-        contract
+        self.save(&contract).await?;
+        Ok(contract)
     }
 
-    pub fn get_contract_review_queue(&self) -> Vec<TenancyContract> {
-        let guard = match this_lock(&self.contracts) {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard
-            .iter()
-            .filter(|c| c.needs_human_review && c.status == "pending_review")
-            .cloned()
-            .collect()
+    pub async fn get_contract_review_queue(&self) -> DbResult<Vec<TenancyContract>> {
+        self.fetch("SELECT row_to_json(t)::text FROM public.tenancy_contracts t WHERE needs_human_review AND status = 'pending_review' ORDER BY created_at", &[]).await
     }
-
-    pub fn approve_contract_review(&self, contract_id: &str) -> Option<TenancyContract> {
-        let mut guard = match this_lock(&self.contracts) {
-            Ok(g) => g,
-            Err(_) => return None,
-        };
-
-        for contract in guard.iter_mut() {
-            if contract.id == contract_id {
-                contract.status = "approved".to_string();
-                contract.needs_human_review = false;
-                return Some(contract.clone());
-            }
-        }
-
-        None
+    pub async fn approve_contract_review(&self, contract_id: &str) -> DbResult<Option<TenancyContract>> {
+        Ok(self.fetch("UPDATE public.tenancy_contracts t SET status = 'approved', needs_human_review = false WHERE id = $1 AND status = 'pending_review' RETURNING row_to_json(t)::text", &[contract_id]).await?.pop())
     }
-
-    pub fn process_outbox_notifications(&self) -> usize {
-        let mut guard = match this_lock(&self.outbox) {
-            Ok(g) => g,
-            Err(_) => return 0,
-        };
-
-        let mut processed_count = 0;
-        let now = Utc::now().to_rfc3339();
-
-        for notif in guard.iter_mut() {
-            if notif.status == "pending" {
-                notif.status = "sent".to_string();
-                notif.processed_at = Some(now.clone());
-                processed_count += 1;
-            }
-        }
-
-        processed_count
+    pub async fn process_outbox_notifications(&self) -> DbResult<usize> {
+        Ok(sqlx::query("UPDATE public.outbox_notifications SET status = 'sent', processed_at = $1 WHERE status = 'pending'")
+            .bind(Utc::now().to_rfc3339()).execute(&self.pool).await.map_err(error)?.rows_affected() as usize)
     }
-
-    pub fn get_outbox_notifications(&self) -> Vec<OutboxNotification> {
-        let guard = match this_lock(&self.outbox) {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard.clone()
-    }
+    pub async fn get_outbox_notifications(&self) -> DbResult<Vec<OutboxNotification>> { self.all().await }
 }

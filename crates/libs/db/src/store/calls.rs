@@ -1,8 +1,8 @@
-use super::{this_lock, DatabaseStore};
+use super::{DatabaseStore, DbResult, postgres::error};
 use crate::models::{AdminGraphNode, CallEndpointsRecord, CallSummaryRecord, StreamEventRecord};
 use chrono::Utc;
-use redis::{streams::StreamRangeReply, AsyncCommands, FromRedisValue};
-use uuid::Uuid;
+use redis::AsyncCommands;
+
 
 impl DatabaseStore {
     pub fn generate_r2_vault_path(&self, agent_id: &str, category: &str, filename: &str) -> String {
@@ -38,24 +38,7 @@ impl DatabaseStore {
             created_at: Utc::now().to_rfc3339(),
         };
 
-        if let Some(client) = &self.redis_client {
-            let mut connection = client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|error| format!("Redis connection failed: {}", error))?;
-            let serialized = serde_json::to_string(&record)
-                .map_err(|error| format!("Could not serialize call summary: {}", error))?;
-            connection
-                .hset::<_, _, _, ()>("admin:call_summaries", call_id, serialized)
-                .await
-                .map_err(|error| format!("Could not persist call summary: {}", error))?;
-        }
-
-        if let Ok(mut guard) = self.call_summaries.lock() {
-            guard.retain(|saved| saved.call_id != call_id);
-            guard.push(record.clone());
-        }
-
+        self.save(&record).await?;
         Ok(record)
     }
 
@@ -72,109 +55,23 @@ impl DatabaseStore {
             created_at: Utc::now().to_rfc3339(),
         };
 
-        if let Some(client) = &self.redis_client {
-            let mut connection = client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|error| format!("Redis connection failed: {}", error))?;
-            let serialized = serde_json::to_string(&record)
-                .map_err(|error| format!("Could not serialize recording record: {}", error))?;
-            connection
-                .hset::<_, _, _, ()>("admin:call_endpoints", session_id, serialized)
-                .await
-                .map_err(|error| format!("Could not persist recording record: {}", error))?;
-            self.enqueue_call_summary(session_id, 5).await?;
-        }
-        let mut guard = this_lock(&self.call_endpoints)?;
-        guard.retain(|saved| saved.session_id != session_id);
-        guard.push(record);
-        Ok(())
+        self.save(&record).await?;
+        self.enqueue_call_summary(session_id, 5).await
     }
 
-    pub fn get_call_endpoints(&self, session_id: &str) -> Option<CallEndpointsRecord> {
-        let guard = match this_lock(&self.call_endpoints) {
-            Ok(g) => g,
-            Err(_) => return None,
-        };
-        guard.iter().find(|r| r.session_id == session_id).cloned()
+    pub async fn get_call_endpoints(&self, session_id: &str) -> DbResult<Option<CallEndpointsRecord>> { self.one(session_id).await }
+
+    pub async fn get_all_call_endpoints(&self) -> DbResult<Vec<CallEndpointsRecord>> { self.all().await }
+
+    pub async fn load_call_endpoints(&self) -> DbResult<Vec<CallEndpointsRecord>> {
+        self.fetch("SELECT row_to_json(t)::text FROM public.call_endpoints t ORDER BY created_at DESC", &[]).await
     }
 
-    pub fn get_all_call_endpoints(&self) -> Vec<CallEndpointsRecord> {
-        let guard = match this_lock(&self.call_endpoints) {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard.clone()
+    pub async fn load_call_summaries(&self) -> DbResult<Vec<CallSummaryRecord>> {
+        self.fetch("SELECT row_to_json(t)::text FROM public.call_summaries t ORDER BY created_at DESC", &[]).await
     }
 
-    pub async fn load_call_endpoints(&self) -> Result<Vec<CallEndpointsRecord>, String> {
-        let Some(client) = &self.redis_client else {
-            return Ok(self.get_all_call_endpoints());
-        };
-        let mut connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|error| format!("Redis connection failed: {}", error))?;
-        let saved: std::collections::HashMap<String, String> = connection
-            .hgetall("admin:call_endpoints")
-            .await
-            .map_err(|error| format!("Could not load call recordings: {}", error))?;
-        let mut records = saved
-            .into_values()
-            .map(|value| {
-                serde_json::from_str::<CallEndpointsRecord>(&value)
-                    .map_err(|error| format!("Could not decode saved recording record: {}", error))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        records.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-        Ok(records)
-    }
-
-    pub async fn load_call_summaries(&self) -> Result<Vec<CallSummaryRecord>, String> {
-        let Some(client) = &self.redis_client else {
-            return Ok(self.get_call_summaries());
-        };
-        let mut connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|error| format!("Redis connection failed: {}", error))?;
-        let saved: std::collections::HashMap<String, String> = connection
-            .hgetall("admin:call_summaries")
-            .await
-            .map_err(|error| format!("Could not load call summaries: {}", error))?;
-        let mut records = saved
-            .into_values()
-            .map(|value| {
-                serde_json::from_str::<CallSummaryRecord>(&value)
-                    .map_err(|error| format!("Could not decode saved call summary: {}", error))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        records.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-        Ok(records)
-    }
-
-    pub async fn load_call_summary(
-        &self,
-        call_id: &str,
-    ) -> Result<Option<CallSummaryRecord>, String> {
-        let Some(client) = &self.redis_client else {
-            return Ok(self.get_call_summary(call_id));
-        };
-        let mut connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|error| format!("Redis connection failed: {}", error))?;
-        let saved: Option<String> = connection
-            .hget("admin:call_summaries", call_id)
-            .await
-            .map_err(|error| format!("Could not load call summary: {}", error))?;
-        saved
-            .map(|value| {
-                serde_json::from_str::<CallSummaryRecord>(&value)
-                    .map_err(|error| format!("Could not decode saved call summary: {}", error))
-            })
-            .transpose()
-    }
+    pub async fn load_call_summary(&self, call_id: &str) -> DbResult<Option<CallSummaryRecord>> { self.one(call_id).await }
 
     pub async fn enqueue_call_summary(
         &self,
@@ -198,196 +95,34 @@ impl DatabaseStore {
         queued.map_err(|error| format!("Could not enqueue call summary: {}", error))
     }
 
-    pub async fn load_call_transcript(&self, session_id: &str) -> Result<String, String> {
-        let run_session_id = format!("run-{}", session_id);
-        let Some(client) = &self.redis_client else {
-            let events = self
-                .stream_events
-                .lock()
-                .map_err(|error| format!("Could not read conversation events: {}", error))?;
-            return Ok(transcript_from_events(events.iter().filter(|event| {
-                event.stream == "stream:conversation"
-                    && (event.session_id == session_id || event.session_id == run_session_id)
-            })));
-        };
-
-        let mut connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|error| format!("Redis connection failed: {}", error))?;
-        let session_stream = format!("stream:conversation:{}", session_id);
-        let mut reply: StreamRangeReply = redis::cmd("XRANGE")
-            .arg(&session_stream)
-            .arg("-")
-            .arg("+")
-            .query_async(&mut connection)
-            .await
-            .map_err(|error| format!("Could not read call transcript: {}", error))?;
-
-        // Agent conversation writes historically used `run-{call_id}`, while summary jobs
-        // are keyed by the unprefixed call ID. Read that per-session stream as a compatibility
-        // fallback so existing calls can still be summarized.
-        if reply.ids.is_empty() {
-            let run_session_stream = format!("stream:conversation:{}", run_session_id);
-            reply = redis::cmd("XRANGE")
-                .arg(&run_session_stream)
-                .arg("-")
-                .arg("+")
-                .query_async(&mut connection)
-                .await
-                .map_err(|error| format!("Could not read call transcript: {}", error))?;
-        }
-
-        // Older calls predate the per-session stream index. Fall back to recent global events.
-        if reply.ids.is_empty() {
-            reply = redis::cmd("XREVRANGE")
-                .arg("stream:conversation")
-                .arg("+")
-                .arg("-")
-                .arg("COUNT")
-                .arg(10000)
-                .query_async(&mut connection)
-                .await
-                .map_err(|error| format!("Could not read call transcript: {}", error))?;
-            reply.ids.reverse();
-        }
-
-        let events = reply.ids.iter().filter_map(|entry| {
-            let field = |name: &str| {
-                entry
-                    .map
-                    .get(name)
-                    .and_then(|value| String::from_redis_value(value).ok())
-            };
-            let (Some(event_session), Some(event_type), Some(payload_json)) =
-                (field("session_id"), field("event_type"), field("payload"))
-            else {
-                return None;
-            };
-            if event_session != session_id && event_session != run_session_id {
-                return None;
-            }
-            Some((event_type, payload_json))
-        });
-        let transcript = transcript_from_payloads(events);
-        if transcript.is_empty() {
-            return Err(format!(
-                "No transcript events found for call {}",
-                session_id
-            ));
-        }
+    pub async fn load_call_transcript(&self, session_id: &str) -> DbResult<String> {
+        let run_id = format!("run-{session_id}");
+        let events: Vec<StreamEventRecord> = self.fetch("SELECT row_to_json(t)::text FROM public.stream_events t WHERE stream = 'stream:conversation' AND session_id IN ($1, $2) ORDER BY id", &[session_id, &run_id]).await?;
+        let transcript = transcript_from_events(events.iter());
+        if transcript.is_empty() { return Err(format!("No transcript events found for call {session_id}")); }
         Ok(transcript)
     }
 
-    pub async fn load_recent_stream_events(&self) -> Result<Vec<StreamEventRecord>, String> {
-        let Some(client) = &self.redis_client else {
-            return self
-                .stream_events
-                .lock()
-                .map(|events| events.clone())
-                .map_err(|error| format!("Could not read in-memory stream events: {}", error));
-        };
-        let mut connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|error| format!("Redis connection failed: {}", error))?;
-        let mut records = Vec::new();
-        for stream in ["stream:audit", "stream:conversation", "stream:logs"] {
-            let reply: StreamRangeReply = redis::cmd("XREVRANGE")
-                .arg(stream)
-                .arg("+")
-                .arg("-")
-                .arg("COUNT")
-                .arg(250)
-                .query_async(&mut connection)
-                .await
-                .map_err(|error| format!("Could not read {}: {}", stream, error))?;
-            for entry in reply.ids {
-                let value = |field: &str| -> Option<String> {
-                    entry
-                        .map
-                        .get(field)
-                        .and_then(|value| String::from_redis_value(value).ok())
-                };
-                let (
-                    Some(session_id),
-                    Some(trace_id),
-                    Some(event_type),
-                    Some(payload_json),
-                    Some(timestamp),
-                ) = (
-                    value("session_id"),
-                    value("trace_id"),
-                    value("event_type"),
-                    value("payload"),
-                    value("timestamp"),
-                )
-                else {
-                    continue;
-                };
-                records.push(StreamEventRecord {
-                    stream: stream.to_string(),
-                    session_id,
-                    trace_id,
-                    event_type,
-                    payload_json,
-                    timestamp,
-                });
-            }
-        }
-        records.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
-        records.truncate(250);
-        Ok(records)
+    pub async fn load_recent_stream_events(&self) -> DbResult<Vec<StreamEventRecord>> {
+        self.fetch("SELECT row_to_json(t)::text FROM public.stream_events t ORDER BY id DESC LIMIT 250", &[]).await
+    }
+    pub async fn load_session_events(&self, session_id: &str) -> DbResult<Vec<StreamEventRecord>> {
+        self.fetch("SELECT row_to_json(t)::text FROM public.stream_events t WHERE session_id IN ($1, $2) ORDER BY id", &[session_id, &format!("run-{session_id}")]).await
     }
 
-    pub fn get_call_summaries(&self) -> Vec<CallSummaryRecord> {
-        let guard = match this_lock(&self.call_summaries) {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard.clone()
+    pub async fn get_call_summaries(&self) -> DbResult<Vec<CallSummaryRecord>> { self.all().await }
+
+    pub async fn get_call_summary(&self, call_id: &str) -> DbResult<Option<CallSummaryRecord>> { self.one(call_id).await }
+
+    pub async fn get_graph_nodes(&self) -> DbResult<Vec<AdminGraphNode>> { self.all().await }
+
+    pub async fn add_graph_node(&self, node: AdminGraphNode) -> DbResult<()> { self.save(&node).await }
+
+    pub async fn update_graph_node(&self, node_id: &str, instruction: String) -> DbResult<bool> {
+        Ok(sqlx::query("UPDATE public.admin_graph_nodes SET instruction = $2 WHERE id = $1").bind(node_id).bind(instruction).execute(&self.pool).await.map_err(error)?.rows_affected() > 0)
     }
 
-    pub fn get_call_summary(&self, call_id: &str) -> Option<CallSummaryRecord> {
-        let guard = match this_lock(&self.call_summaries) {
-            Ok(g) => g,
-            Err(_) => return None,
-        };
-        guard.iter().find(|r| r.call_id == call_id).cloned()
-    }
-
-    pub fn get_graph_nodes(&self) -> Vec<AdminGraphNode> {
-        let guard = match this_lock(&self.graph_nodes) {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard.clone()
-    }
-
-    pub fn add_graph_node(&self, node: AdminGraphNode) {
-        if let Ok(mut guard) = self.graph_nodes.lock() {
-            guard.push(node);
-        }
-    }
-
-    pub fn update_graph_node(&self, node_id: &str, new_instruction: String) -> bool {
-        if let Ok(mut guard) = self.graph_nodes.lock() {
-            if let Some(node) = guard.iter_mut().find(|n| n.id == node_id) {
-                node.instruction = new_instruction;
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn delete_graph_node(&self, node_id: &str) -> bool {
-        if let Ok(mut guard) = self.graph_nodes.lock() {
-            let initial_len = guard.len();
-            guard.retain(|n| n.id != node_id);
-            return guard.len() < initial_len;
-        }
-        false
-    }
+    pub async fn delete_graph_node(&self, node_id: &str) -> DbResult<bool> { self.delete::<AdminGraphNode>(node_id).await }
 
     pub async fn push_redis_stream(
         &self,
@@ -406,41 +141,11 @@ impl DatabaseStore {
             timestamp: Utc::now().to_rfc3339(),
         };
 
-        let Some(client) = &self.redis_client else {
-            return Err("Redis client is not available for event persistence".to_string());
-        };
-        let mut connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|error| format!("Redis connection failed: {}", error))?;
-        let fields = [
-            ("session_id", session_id),
-            ("trace_id", trace_id),
-            ("event_type", event_type),
-            ("payload", payload_json),
-            ("timestamp", &record.timestamp),
-        ];
-        let _stream_id: String = connection
-            .xadd(stream_name, "*", &fields)
-            .await
-            .map_err(|error| format!("Could not persist event in {}: {}", stream_name, error))?;
-        if stream_name == "stream:conversation" {
-            let session_stream = format!("{}:{}", stream_name, session_id);
-            let _: String = connection
-                .xadd(&session_stream, "*", &fields)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "Could not index conversation event for {}: {}",
-                        session_id, error
-                    )
-                })?;
-        }
-        if let Ok(mut guard) = self.stream_events.lock() {
-            guard.push(record);
-        }
-
-        Ok(format!("stream-id-{}", Uuid::new_v4()))
+        // Neon is the durable event/transcript source. Redis is only a transport.
+        let id: i64 = sqlx::query_scalar("INSERT INTO public.stream_events (stream, session_id, trace_id, event_type, payload_json, timestamp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id")
+            .bind(stream_name).bind(session_id).bind(trace_id).bind(event_type).bind(payload_json).bind(&record.timestamp)
+            .fetch_one(&self.pool).await.map_err(error)?;
+        Ok(id.to_string())
     }
 
     pub async fn set_json_with_ttl(
@@ -451,8 +156,7 @@ impl DatabaseStore {
     ) -> Result<(), String> {
         if let Some(ref client) = self.redis_client {
             if let Ok(mut con) = client.get_multiplexed_async_connection().await {
-                let _res: Result<(), _> = con.set_ex(key, payload_json, ttl_seconds as u64).await;
-                return Ok(());
+                return con.set_ex::<_, _, ()>(key, payload_json, ttl_seconds as u64).await.map_err(|_| "Redis write failed".into());
             }
         }
         Err("Redis client not available".to_string())
@@ -475,7 +179,7 @@ fn transcript_from_events<'a>(events: impl Iterator<Item = &'a StreamEventRecord
     )
 }
 
-fn transcript_from_payloads(events: impl Iterator<Item = (String, String)>) -> String {
+pub(super) fn transcript_from_payloads(events: impl Iterator<Item = (String, String)>) -> String {
     events
         .filter_map(|(event_type, payload)| {
             let payload: serde_json::Value = serde_json::from_str(&payload).ok()?;

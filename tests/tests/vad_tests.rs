@@ -105,12 +105,12 @@ async fn test_user_text_reaches_all_channels_rag_decision_orchestrator_agent() {
 
     // 2. RAG CHANNEL: Verify query parsing and vector/keyword retrieval
     let rag = RAGPipeline::new(db.clone());
-    let filters = rag.parse_query_to_filters(user_text);
+    let filters = rag.parse_query_to_filters(user_text).await.unwrap();
     assert_eq!(filters.location, Some("Dubai Marina".to_string()), "RAG should parse location as Dubai Marina");
     assert_eq!(filters.bedrooms, Some(2), "RAG should parse bedroom count as 2");
     assert_eq!(filters.listing_type, Some("rent".to_string()), "RAG should parse listing type as rent");
 
-    let rag_results = rag.search(user_text);
+    let rag_results = rag.search(user_text).await.unwrap();
     assert!(!rag_results.is_empty(), "RAG pipeline must return matching listings from the database");
     assert!(rag_results[0].listing.location.contains("Marina"), "Top listing must match Dubai Marina");
 
@@ -121,7 +121,7 @@ async fn test_user_text_reaches_all_channels_rag_decision_orchestrator_agent() {
         "search_properties",
         &tool_args,
         "task-rag-1",
-    );
+    ).await;
     assert_eq!(tool_result["success"], true, "Decision model tool execution should succeed");
     let response_text = tool_result["response_text"].as_str().expect("Response text must be present");
     assert!(
@@ -217,8 +217,8 @@ async fn test_whisper_hallucination_and_audio_threshold_filtering() {
     assert!(valid_audio_len >= min_sample_threshold, "Valid 1s speech utterance must meet minimum threshold");
 }
 
-#[test]
-fn test_silero_vad_probabilities() {
+#[tokio::test]
+async fn test_silero_vad_probabilities() {
     use silero_vad_pure::{SampleRate, SileroVad};
     let mut vad = SileroVad::new(SampleRate::Hz16000).expect("SileroVad init");
     

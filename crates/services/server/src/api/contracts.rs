@@ -21,7 +21,7 @@ pub async fn upload_contract(
     State(state): State<AppState>,
     Json(payload): Json<ContractUploadReq>,
 ) -> impl IntoResponse {
-    let contract = state.db.upload_tenancy_contract(
+    let contract = db_try!(state.db.upload_tenancy_contract(
         &payload.agent_id,
         &payload.filename,
         &payload.landlord_name,
@@ -32,8 +32,8 @@ pub async fn upload_contract(
         payload.cheques_count,
         payload.notice_period_days,
         payload.confidence_score,
-    );
-    Json(json!({ "success": true, "contract": contract }))
+    ));
+    Json(json!({ "success": true, "contract": contract })).into_response()
 }
 
 use crate::api::AdminUser;
@@ -42,8 +42,8 @@ pub async fn get_review_queue(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let queue = state.db.get_contract_review_queue();
-    Json(json!({ "success": true, "review_queue": queue }))
+    let queue = db_try!(state.db.get_contract_review_queue());
+    Json(json!({ "success": true, "review_queue": queue })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -56,10 +56,10 @@ pub async fn approve_contract(
     State(state): State<AppState>,
     Json(payload): Json<ApproveContractReq>,
 ) -> impl IntoResponse {
-    match state.db.approve_contract_review(&payload.contract_id) {
-        Some(approved) => Json(json!({ "success": true, "contract": approved })),
+    match db_try!(state.db.approve_contract_review(&payload.contract_id)) {
+        Some(approved) => Json(json!({ "success": true, "contract": approved })).into_response(),
         None => {
-            Json(json!({ "success": false, "error": "Contract not found or already approved" }))
+            Json(json!({ "success": false, "error": "Contract not found or already approved" })).into_response()
         }
     }
 }

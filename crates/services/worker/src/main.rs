@@ -1,3 +1,4 @@
+mod conversation;
 use std::panic::AssertUnwindSafe;
 use tokio::sync::mpsc;
 use futures_util::FutureExt;
@@ -20,34 +21,11 @@ pub enum DbUpdateTask {
 }
 
 pub async fn run_summary_job_worker(
-    mut summary_rx: mpsc::Receiver<String>, // Receives completed session ids.
+    mut summary_rx: mpsc::Receiver<(String, String)>,
     transaction_tx: mpsc::Sender<TransactionTask>,
-    db: DatabaseStore,
 ) {
-    loop {
-        let fut = AssertUnwindSafe(async {
-            while let Some(session_id) = summary_rx.recv().await {
-                println!("[Summary Worker] Loading transcript for call: {}", session_id);
-                match db.load_call_transcript(&session_id).await {
-                    Ok(transcript) => {
-                        if let Err(error) = transaction_tx
-                            .send(TransactionTask::Summarize {
-                                session_id: session_id.clone(),
-                                transcript,
-                            })
-                            .await
-                        {
-                            eprintln!("[Summary Worker] Could not queue call {} for summarization: {}", session_id, error);
-                        }
-                    }
-                    Err(error) => eprintln!("[Summary Worker] Could not load transcript for {}: {}", session_id, error),
-                }
-            }
-        });
-
-        if let Err(_) = fut.catch_unwind().await {
-            eprintln!("[Summary Worker] Panic intercepted safely! Restarting worker loop.");
-        } else {
+    while let Some((session_id, transcript)) = summary_rx.recv().await {
+        if transaction_tx.send(TransactionTask::Summarize { session_id, transcript }).await.is_err() {
             break;
         }
     }
@@ -107,7 +85,7 @@ async fn generate_summary(transcript: &str) -> Result<String, String> {
             "messages": [
                 {
                     "role": "system",
-                    "content": "Summarize this real estate voice call in 2 to 4 concise sentences. Capture the caller's stated needs, budget, location, property preferences, decisions, and unresolved follow-up. Include only details explicitly present in the transcript; do not infer or invent facts."
+                    "content": std::env::var("SUMMARY_SYSTEM_PROMPT").unwrap_or_default()
                 },
                 { "role": "user", "content": transcript }
             ]
@@ -148,12 +126,29 @@ pub async fn run_db_update_worker(
                         generated_summary,
                     } => {
                         println!("[DB Update Worker] Persisting summary for session: {}", session_id);
+                        let events = match db.load_session_events(&session_id).await {
+                            Ok(events) => events,
+                            Err(error) => { eprintln!("Could not load call context: {error}"); continue; }
+                        };
+                        let user_id = events.iter().find(|event| event.event_type == "SESSION_STARTED")
+                            .and_then(|event| serde_json::from_str::<serde_json::Value>(&event.payload_json).ok())
+                            .and_then(|payload| payload.get("user_id").and_then(|v| v.as_str()).map(str::to_owned))
+                            .unwrap_or_default();
+                        let duration = events.first().zip(events.last()).and_then(|(first, last)| {
+                            let start = chrono::DateTime::parse_from_rfc3339(&first.timestamp).ok()?;
+                            let end = chrono::DateTime::parse_from_rfc3339(&last.timestamp).ok()?;
+                            Some((end - start).num_seconds().max(0).min(u32::MAX as i64) as u32)
+                        }).unwrap_or(0);
+                        let endpoints = match db.get_call_endpoints(&session_id).await {
+                            Ok(record) => record,
+                            Err(error) => { eprintln!("Could not load recording details: {error}"); continue; }
+                        };
                         if let Err(error) = db.save_call_summary(
                             &session_id,
-                            "",
-                            0,
-                            "",
-                            "",
+                            &user_id,
+                            duration,
+                            endpoints.as_ref().map(|e| e.text_url.as_str()).unwrap_or(""),
+                            endpoints.as_ref().map(|e| e.audio_url.as_str()).unwrap_or(""),
                             &generated_summary,
                             0,
                             "",
@@ -180,6 +175,7 @@ async fn main() {
     dotenvy::dotenv().ok(); // Load .env if it exists
     println!("Starting separate Async Background Worker service...");
     let db = DatabaseStore::new();
+    db.initialize().await.expect("Neon database unavailable or migrations missing");
 
     let existing_summary_ids = db
         .load_call_summaries()
@@ -199,6 +195,7 @@ async fn main() {
         Err(error) => eprintln!("[Worker Init] Could not load existing call recordings for summary backfill: {}", error),
     }
 
+    let (conversation_fetch_tx, conversation_fetch_rx) = mpsc::channel(100);
     let (summary_worker_tx, summary_worker_rx) = mpsc::channel(100);
     let (transaction_tx, transaction_rx) = mpsc::channel(100);
     let (db_update_tx, db_update_rx) = mpsc::channel(100);
@@ -207,13 +204,13 @@ async fn main() {
     let redis_url = cfg.redis_url.clone();
     
     let redis_url_poller = redis_url.clone();
-    let summary_tx_poller = summary_worker_tx.clone();
+    let summary_tx_poller = conversation_fetch_tx;
     
     // Delay Queue Poller Loop
     tokio::spawn(async move {
         println!("[Worker Init] Starting ZSET Delay Queue Poller...");
         if let Ok(client) = redis::Client::open(redis_url_poller) {
-            if let Ok(mut con) = client.get_async_connection().await {
+            if let Ok(mut con) = client.get_multiplexed_async_connection().await {
                 use redis::AsyncCommands;
                 loop {
                     let now = chrono::Utc::now().timestamp();
@@ -239,10 +236,12 @@ async fn main() {
         }
     });
 
+    let conversation_handle = tokio::spawn(conversation::run_conversation_fetch_worker(
+        conversation_fetch_rx, summary_worker_tx, db.clone(),
+    ));
     let summary_handle = tokio::spawn(run_summary_job_worker(
         summary_worker_rx,
         transaction_tx,
-        db.clone(),
     ));
 
     let tx_handle = tokio::spawn(run_transaction_worker(
@@ -255,5 +254,5 @@ async fn main() {
         db.clone(),
     ));
 
-    let _ = tokio::join!(summary_handle, tx_handle, db_handle);
+    let _ = tokio::join!(conversation_handle, summary_handle, tx_handle, db_handle);
 }

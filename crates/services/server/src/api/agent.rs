@@ -35,8 +35,8 @@ pub async fn agent_chat_handler(
         .unwrap_or_else(|| cfg.agent_system_prompt.clone());
 
     // Retrieve context dynamically from RAG
-    let knowledge = state.rag.search_knowledge(&payload.message);
-    let listings = state.rag.search(&payload.message);
+    let knowledge = db_try!(state.rag.search_knowledge(&payload.message));
+    let listings = db_try!(state.rag.search(&payload.message));
 
     // Retrieval evidence takes precedence over the lexical out-of-domain heuristic. This lets
     // domain questions through even when their wording contains a term the heuristic dislikes.
@@ -52,7 +52,7 @@ pub async fn agent_chat_handler(
             endpoint: cfg.llm_endpoint_url.clone(),
             matches_found: 0,
             error: None,
-        });
+        }).into_response();
     }
 
     // If there is an active matching asset and the user asks an edge question (e.g. is it available or not, rent, rooms)
@@ -68,7 +68,7 @@ pub async fn agent_chat_handler(
                 endpoint: cfg.llm_endpoint_url.clone(),
                 matches_found: listings.len(),
                 error: None,
-            });
+            }).into_response();
         }
     }
 
@@ -140,7 +140,7 @@ pub async fn agent_chat_handler(
                             endpoint: cfg.llm_endpoint_url.clone(),
                             matches_found: knowledge.len() + listings.len(),
                             error: None,
-                        });
+                        }).into_response();
                     }
                 }
             }
@@ -167,7 +167,7 @@ pub async fn agent_chat_handler(
         endpoint: cfg.llm_endpoint_url.clone(),
         matches_found: knowledge.len() + listings.len(),
         error: None,
-    })
+    }).into_response()
 }
 
 /// Returns currently active models and domain parameters from .env
@@ -188,11 +188,11 @@ pub async fn agent_get_config_handler(State(state): State<AppState>) -> impl Int
         "action_booking_keywords": cfg.action_booking_keywords,
         "filter_primary_type_a": cfg.filter_primary_type_a,
         "filter_primary_type_b": cfg.filter_primary_type_b,
-    }))
+    })).into_response()
 }
 
 /// Dynamically verifies whether all configured models (LLM, decision, STT, TTS) exist and respond
 pub async fn agent_verify_models_handler(State(state): State<AppState>) -> impl IntoResponse {
     let report = agent::ModelChecker::verify_all_system_models(&state.config).await;
-    Json(serde_json::to_value(report).unwrap_or_else(|_| json!({ "all_models_valid": false })))
+    Json(serde_json::to_value(report).unwrap_or_else(|_| json!({ "all_models_valid": false }))).into_response()
 }

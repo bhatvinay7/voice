@@ -243,7 +243,7 @@ async fn test_grpc_rag_tool_execution_through_orchestrator_brain() {
     let mut resolved = false;
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(events) = db.stream_events.lock() {
+        if let Ok(events) = db.load_recent_stream_events().await {
             if events.iter().any(|e| e.session_id.contains(&session_id) && e.event_type == "LLM_RESPONSE") {
                 resolved = true;
                 break;
