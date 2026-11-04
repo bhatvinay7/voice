@@ -1,17 +1,13 @@
 import React from "react";
 import type { Metadata } from "next";
-import { Instrument_Serif, Inter } from "next/font/google";
+import { Manrope } from "next/font/google";
 import "./globals.css";
+import "./design-system.css";
 import { Providers } from "./providers";
 
-const instrumentSerif = Instrument_Serif({
-  weight: ["400"],
+const manrope = Manrope({
   subsets: ["latin"],
-  variable: "--font-serif",
-});
-
-const inter = Inter({
-  subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800"],
   variable: "--font-sans",
 });
 
@@ -26,7 +22,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${instrumentSerif.variable} ${inter.variable}`} suppressHydrationWarning>
+    <html lang="en" className={manrope.variable} suppressHydrationWarning>
       <body className="bg-theme-main text-theme-text min-h-screen font-sans antialiased" suppressHydrationWarning>
         <Providers>{children}</Providers>
       </body>

@@ -1,0 +1,172 @@
+/* Design system surfaces inspired by modern voice-AI SaaS layouts. */
+
+html.light, [data-theme="light"], .light {
+  --bg-elevated: #f0efea;
+  --grid-line: rgba(0, 0, 0, 0.05);
+  --glow-cyan: rgba(2, 132, 199, 0.10);
+}
+
+body {
+  background-image: radial-gradient(1200px 600px at 85% -10%, var(--glow-cyan), transparent 60%);
+  background-attachment: fixed;
+}
+
+h1, h2, h3 { font-family: var(--font-sans), "Manrope", sans-serif; letter-spacing: -0.02em; }
+
+.surface-grid {
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse at 30% 40%, #000 30%, transparent 75%);
+}
+
+.auth-brand-panel {
+  background: linear-gradient(160deg, var(--bg-card) 0%, var(--bg-main) 70%);
+  border-right: 1px solid var(--border-main);
+}
+
+.auth-card {
+  border-radius: 1.5rem;
+  border: 1px solid var(--border-main);
+  background: var(--bg-card);
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.55), inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+}
+
+.eyebrow-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 9999px;
+  border: 1px solid color-mix(in srgb, var(--accent-cyan) 35%, transparent);
+  background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+  color: var(--accent-cyan);
+  padding: 0.3rem 0.85rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.text-gradient-accent {
+  background: linear-gradient(90deg, var(--text-main), var(--accent-cyan));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.stat-tile {
+  border-radius: 1rem;
+  border: 1px solid var(--border-main);
+  background: var(--bg-elevated);
+  padding: 0.9rem 1rem;
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+.stat-tile:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--accent-cyan) 40%, transparent); }
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.85rem;
+  background: #0284c7;
+  color: #ffffff;
+  padding: 0.8rem 1.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background-color 0.15s ease;
+  box-shadow: 0 4px 14px -4px rgba(2, 132, 199, 0.45);
+}
+.btn-primary:hover { background: #0369a1; box-shadow: 0 6px 18px -4px rgba(2, 132, 199, 0.65); transform: translateY(-1px); }
+.btn-primary:active { transform: scale(0.98); }
+.btn-primary:disabled { cursor: not-allowed; opacity: 0.5; transform: none; box-shadow: none; }
+html.dark .btn-primary, [data-theme="dark"] .btn-primary { background: #38bdf8; color: #020617; box-shadow: 0 4px 14px -4px rgba(56, 189, 248, 0.4); }
+html.dark .btn-primary:hover, [data-theme="dark"] .btn-primary:hover { background: #7dd3fc; }
+
+/* Dark mode: components get a soft light-gray edge overlay (top sheen + hairline ring). */
+:root, html.dark, [data-theme="dark"] {
+  --edge-overlay: inset 0 1px 0 0 rgba(255, 255, 255, 0.09), inset 0 0 0 1px rgba(212, 212, 216, 0.06);
+  --surface-shadow: 0 18px 40px -24px rgba(0, 0, 0, 0.9);
+}
+html.light, [data-theme="light"] {
+  --edge-overlay: inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+  --surface-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.12);
+}
+
+.bg-theme-card,
+.auth-card,
+.stat-tile,
+.edge-highlight {
+  box-shadow: var(--edge-overlay), var(--surface-shadow) !important;
+}
+.bg-theme-card-hover { box-shadow: var(--edge-overlay); }
+
+html.dark .border-theme-border,
+[data-theme="dark"] .border-theme-border,
+.dark .border-theme-border {
+  border-color: var(--border-main);
+}
+
+/* Pagination / icon buttons */
+.page-btn {
+  display: inline-flex;
+  min-width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.6rem;
+  border: 1px solid var(--border-main);
+  background: var(--bg-card);
+  padding: 0 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-main);
+  box-shadow: var(--edge-overlay);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.page-btn:hover:not(:disabled) { background: var(--bg-card-hover); border-color: color-mix(in srgb, var(--accent-cyan) 40%, transparent); }
+.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-btn-active { background: #0284c7; color: #ffffff; border-color: transparent; box-shadow: 0 4px 10px -4px rgba(2,132,199,0.5); }
+.page-btn-active:hover:not(:disabled) { background: #0369a1; }
+html.dark .page-btn-active, [data-theme="dark"] .page-btn-active { background: #38bdf8; color: #020617; box-shadow: 0 4px 10px -4px rgba(56,189,248,0.4); }
+html.dark .page-btn-active:hover:not(:disabled), [data-theme="dark"] .page-btn-active:hover:not(:disabled) { background: #7dd3fc; }
+
+/* Blue CTA button — visible on both light and dark themes */
+.btn-blue {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.75rem;
+  background: #0284c7;
+  color: #ffffff;
+  padding: 0.65rem 1.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border: none;
+  transition: background-color 0.15s ease, transform 0.12s ease, box-shadow 0.2s ease;
+  box-shadow: 0 4px 14px -4px rgba(2, 132, 199, 0.5);
+}
+.btn-blue:hover:not(:disabled) { background: #0369a1; box-shadow: 0 6px 18px -4px rgba(2, 132, 199, 0.65); transform: translateY(-1px); }
+.btn-blue:active:not(:disabled) { transform: scale(0.97); }
+.btn-blue:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+html.dark .btn-blue, [data-theme="dark"] .btn-blue { background: #38bdf8; color: #020617; box-shadow: 0 4px 14px -4px rgba(56, 189, 248, 0.4); }
+html.dark .btn-blue:hover:not(:disabled), [data-theme="dark"] .btn-blue:hover:not(:disabled) { background: #7dd3fc; }
+
+/* Loading skeleton */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-card) 0%, var(--bg-card-hover) 50%, var(--bg-card) 100%);
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.4s ease-in-out infinite;
+  border: 1px solid var(--border-subtle);
+}
+@keyframes skeletonShimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* Overflow safety: long ids, emails and URLs never break layouts.
+   IMPORTANT: overflow on `html` breaks position:sticky — only set it on body. */
+body { overflow-x: hidden; }
+main, section, aside, article { min-width: 0; }
+p, span, h1, h2, h3, h4, li, td, th, dd { overflow-wrap: anywhere; }
+pre, code { overflow: auto; max-width: 100%; }
+.overflow-y-auto, .overflow-auto { scrollbar-gutter: stable; overscroll-behavior: contain; }
