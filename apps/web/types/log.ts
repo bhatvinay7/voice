@@ -10,6 +10,8 @@ export interface StreamEventRecord {
 export interface CallSummaryRecord {
   call_id: string;
   user_id?: string;
+  user_name?: string;
+  user_email?: string;
   duration_seconds?: number;
   r2_transcript_path?: string;
   r2_audio_path?: string;
@@ -20,4 +22,23 @@ export interface CallSummaryRecord {
   qualified_budget_aed?: number;
   preferred_location?: string;
   created_at: string;
+}
+
+export interface PaginationMeta {
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+}
+
+export interface CallSummaryPage {
+  success: boolean;
+  summaries: CallSummaryRecord[];
+  pagination: PaginationMeta;
+}
+
+export interface CallSummaryQuery {
+  page: number;
+  pageSize: number;
+  search: string;
 }
