@@ -7,12 +7,11 @@ import { VoiceAgentOrbsDemo } from "../../components/VoiceAgentOrbsDemo";
 import { PrivateRoute } from "../../components/PrivateRoute";
 import { PropertySearch } from "../../components/PropertySearch";
 import { DashboardSidebar, DashboardTab } from "../../components/DashboardSidebar";
-import { useUserProfile, useVerifyDocument, useListings } from "../../lib/api";
+import { useUserProfile, useVerifyDocument } from "../../lib/api";
 import { motion, AnimatePresence } from "framer-motion";
 import { BadgeCheck, Fingerprint } from "lucide-react";
 
 export default function UserDashboardPage() {
-  const [agentModeActive, setAgentModeActive] = useState(true);
   const [activeTab, setActiveTab] = useState<DashboardTab>("assistant");
   const [isCallActive, setIsCallActive] = useState(false);
 
@@ -22,7 +21,6 @@ export default function UserDashboardPage() {
   const callId = callIdRef.current;
 
   const { data: userData } = useUserProfile();
-  const { data: listingsData, isLoading: listingsLoading } = useListings();
   const verifyDocMutation = useVerifyDocument();
 
   const [nationalIdInput, setNationalIdInput] = useState("");
@@ -52,7 +50,6 @@ export default function UserDashboardPage() {
             <WebRtcCallWidget
               callId={callId}
               userId={user?.id || ""}
-              agentModeActive={agentModeActive}
               onToggleCallState={setIsCallActive}
             />
           </motion.div>
@@ -81,11 +78,8 @@ export default function UserDashboardPage() {
           >
             <div className="relative z-10">
               <PropertySearch
-                listings={listingsData?.listings || []}
                 userId={user?.id || ""}
                 isVerified={user?.is_verified || false}
-                agentModeActive={agentModeActive}
-                isLoading={listingsLoading}
               />
             </div>
           </motion.div>
@@ -124,7 +118,7 @@ export default function UserDashboardPage() {
                   <p className="text-sm font-bold text-white">Drag & drop your Tenancy Contract (PDF / DOCX)</p>
                   <p className="text-xs text-zinc-400 mt-1 font-mono">Max size 25MB &bull; Automated Ejari & RERA Compliance Extraction</p>
                 </div>
-                <button className="px-5 py-2.5 bg-white hover:bg-zinc-200 text-black font-bold text-xs rounded-xl shadow-md transition-all border border-white/30 dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.3)]">
+                <button className="btn-blue">
                   Browse Files
                 </button>
               </div>
@@ -185,7 +179,7 @@ export default function UserDashboardPage() {
                   <button
                     type="submit"
                     disabled={verifyDocMutation.isPending}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm px-8 py-3 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shadow-lg shadow-emerald-600/20 dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.2)]"
+                    className="btn-blue whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {verifyDocMutation.isPending ? "Verifying..." : "Verify Government ID"}
                   </button>
@@ -200,12 +194,10 @@ export default function UserDashboardPage() {
   };
 
   return (
-    <div className="min-h-screen bg-theme-main text-theme-text font-sans antialiased overflow-x-hidden transition-colors duration-300">
+    <div className="theme-page min-h-screen bg-theme-main text-theme-text font-sans antialiased overflow-x-clip transition-colors duration-300">
       <div className="relative z-10 flex flex-col min-h-screen">
         <Header
           user={user}
-          agentModeActive={agentModeActive}
-          onToggleAgentMode={setAgentModeActive}
         />
 
         <main className="flex-1 w-full max-w-[1920px] pt-20 pb-12 pl-2 sm:pl-3 lg:pl-4 xl:pl-5 pr-3 sm:pr-6 lg:pr-8 mx-auto">
