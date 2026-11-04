@@ -78,7 +78,7 @@ export function AdminContractReview(): React.ReactElement {
                 <button
                   onClick={() => handleApprove(contract.id)}
                   disabled={approveMutation.isPending}
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-4 py-2 rounded-lg transition"
+                  className="btn-blue disabled:opacity-50"
                 >
                   {approveMutation.isPending ? "Approving..." : "Approve Extracted Fields"}
                 </button>
