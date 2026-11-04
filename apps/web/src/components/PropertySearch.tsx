@@ -1,44 +1,42 @@
 "use client";
 
 import React, { useState } from "react";
-import { PropertyListing } from "../../types/listing";
-import { useBookViewingSlot } from "../lib/api";
+import { useBookViewingSlot, useManualListingSearch } from "../lib/api";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, MapPin, Home, Calendar, ChevronRight, Sparkles } from "lucide-react";
 import { formatNumber } from "../lib/formatters";
 
 interface PropertySearchProps {
-  listings: PropertyListing[];
   userId: string;
   isVerified: boolean;
-  agentModeActive: boolean;
-  isLoading?: boolean;
 }
 
 export function PropertySearch({
-  listings,
   userId,
   isVerified,
-  agentModeActive,
-  isLoading = false,
 }: PropertySearchProps): React.ReactElement {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCity, setSelectedCity] = useState<string>("All");
   const [selectedType, setSelectedType] = useState<string>("All");
   const [bookingMessage, setBookingMessage] = useState<{ text: string; isError: boolean } | null>(null);
 
+  const { data: searchData, isLoading } = useManualListingSearch({
+    query: searchTerm,
+    location: selectedCity === "All" ? "" : selectedCity,
+    listing_type: selectedType === "All" ? undefined : selectedType as "rent" | "buy",
+  });
+  const listings = searchData?.listings || [];
+
   const bookSlotMutation = useBookViewingSlot();
 
-  const filteredListings = listings.filter((listing) => {
-    const matchesSearch =
-      listing.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      listing.location.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCity = selectedCity === "All" || listing.city === selectedCity;
-    const matchesType = selectedType === "All" || listing.listing_type === selectedType;
-    return matchesSearch && matchesCity && matchesType;
-  });
-
   const handleBookSlot = (listingId: string, slotTime: string) => {
+    if (!isVerified) {
+      setBookingMessage({
+        text: "Verify your Emirates ID before reserving a viewing.",
+        isError: true,
+      });
+      return;
+    }
     const idempotencyKey = `idemp-web-${Date.now()}`;
     bookSlotMutation.mutate(
       {
@@ -84,14 +82,14 @@ export function PropertySearch({
             <div className="inline-flex items-center space-x-2 bg-theme-main border border-theme-border dark:border-white/20 px-3 py-1 rounded-full shadow-[inset_0_1px_0_0_rgba(255,255,255,0.15)]">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
               <span className="text-xs font-bold tracking-widest text-theme-text uppercase">
-                {agentModeActive ? "AI Autonomous Mode ACTIVE" : "Manual Search Mode"}
+                Property Search
               </span>
             </div>
             <h2 className="text-3xl md:text-4xl font-extrabold text-theme-text tracking-tight font-serif">
               Premium Properties
             </h2>
             <p className="text-theme-sub text-sm md:text-base leading-relaxed">
-              Browse verified listings globally. {agentModeActive ? "Our AI assistant is active to handle voice queries, natural language filtering, and instant slot reservations." : "Use manual controls to filter properties."}
+              Browse verified listings with natural-language filters and instant viewing reservations.
             </p>
           </div>
         </div>
@@ -186,7 +184,7 @@ export function PropertySearch({
             </div>
           ))
         ) : (
-          filteredListings.map((listing, i) => (
+          listings.map((listing, i) => (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -239,7 +237,7 @@ export function PropertySearch({
                   <button
                     key={slot}
                     onClick={() => handleBookSlot(listing.id, slot)}
-                    className="text-xs bg-white dark:bg-black hover:bg-zinc-100 dark:hover:bg-zinc-900 text-black dark:text-white font-bold px-4 py-2 rounded-xl border border-slate-300 dark:border-white/20 transition-all overflow-hidden flex-1 text-center font-mono shadow-sm"
+                    className="btn-blue text-xs flex-1 text-center font-mono"
                   >
                     <span className="relative z-10 flex items-center justify-center gap-1">
                       {new Date(slot).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -253,7 +251,7 @@ export function PropertySearch({
             </div>
           </motion.div>
         )))}
-        {!isLoading && filteredListings.length === 0 && (
+        {!isLoading && listings.length === 0 && (
           <div className="col-span-full py-20 flex flex-col items-center justify-center text-theme-sub border border-dashed border-theme-border rounded-3xl">
             <Search className="w-10 h-10 mb-4 opacity-50" />
             <p className="text-lg font-medium text-theme-text">No properties found</p>
