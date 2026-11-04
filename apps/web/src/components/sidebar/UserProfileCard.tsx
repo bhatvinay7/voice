@@ -2,7 +2,16 @@
 
 import React from "react";
 import { BadgeCheck } from "lucide-react";
+import { getInitials } from "../ui/Avatar";
 import { UserProfile } from "../../../types/user";
+
+const PLACEHOLDER_NAMES = new Set(["user", "admin", "administrator", "guest"]);
+
+function displayName(user: UserProfile | null): string {
+  const name = user?.name?.trim() ?? "";
+  if (name && !PLACEHOLDER_NAMES.has(name.toLowerCase())) return name;
+  return user?.email?.split("@")[0] ?? "Guest";
+}
 
 interface UserProfileCardProps {
   user: UserProfile | null;
@@ -14,12 +23,12 @@ export function UserProfileCard({
   onSelectKyc,
 }: UserProfileCardProps): React.ReactElement {
   return (
-    <div className="relative overflow-hidden bg-theme-main p-4 rounded-2xl border border-theme-border dark:border-white/15 shadow-md dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)] group">
+    <div className="relative bg-theme-main p-4 rounded-2xl border border-theme-border dark:border-white/15 shadow-md dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)] group">
       <div className="flex items-center gap-3.5 relative z-10">
         <div className="relative">
           <div className="w-11 h-11 rounded-xl bg-gradient-to-tr from-white/30 via-white/15 to-transparent p-0.5 shadow-md">
             <div className="w-full h-full bg-theme-card rounded-[10px] flex items-center justify-center text-theme-text font-bold border border-theme-border dark:border-white/15 dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.15)]">
-              {user?.name?.trim().charAt(0).toUpperCase() || "U"}
+              {getInitials(user?.name, user?.email)}
             </div>
           </div>
           <span
@@ -32,12 +41,12 @@ export function UserProfileCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <h3 className="text-sm font-bold text-theme-text truncate tracking-tight">
-              {user?.name || "Guest User"}
+              {displayName(user)}
             </h3>
             {user?.is_verified && <BadgeCheck className="w-4 h-4 text-emerald-400 shrink-0" />}
           </div>
           <p className="text-[11px] text-theme-sub truncate font-mono mt-0.5">
-            {user?.email || "user@estate.ae"}
+            {user?.email || "Not signed in"}
           </p>
         </div>
       </div>
