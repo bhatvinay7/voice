@@ -47,7 +47,7 @@ export function AuthFormContainer(): React.ReactElement {
   };
 
   return (
-    <section className="w-full rounded-3xl border border-theme-border bg-theme-card p-6 text-theme-text shadow-xl dark:border-white/15 dark:bg-black sm:p-8">
+    <section className="auth-card w-full p-6 text-theme-text sm:p-8">
       <AuthCardHeader mode={mode} />
 
       {errorMsg && (
@@ -69,7 +69,7 @@ export function AuthFormContainer(): React.ReactElement {
                 onChange={(event) => setName(event.target.value)}
                 placeholder="Your name"
                 required
-                className="w-full rounded-xl border border-theme-border bg-theme-main py-3 pl-10 pr-4 text-sm text-theme-text outline-none focus:border-theme-text dark:border-white/20 dark:bg-black"
+                className="w-full rounded-xl border border-theme-border bg-theme-main py-3 pl-10 pr-4 text-sm text-theme-text outline-none focus:border-cyan-400/70 focus:ring-4 focus:ring-cyan-400/10 transition"
               />
             </span>
           </label>
@@ -86,7 +86,7 @@ export function AuthFormContainer(): React.ReactElement {
               placeholder="you@example.com"
               autoComplete="email"
               required
-              className="w-full rounded-xl border border-theme-border bg-theme-main py-3 pl-10 pr-4 text-sm text-theme-text outline-none focus:border-theme-text dark:border-white/20 dark:bg-black"
+              className="w-full rounded-xl border border-theme-border bg-theme-main py-3 pl-10 pr-4 text-sm text-theme-text outline-none focus:border-cyan-400/70 focus:ring-4 focus:ring-cyan-400/10 transition"
             />
           </span>
         </label>
@@ -102,7 +102,7 @@ export function AuthFormContainer(): React.ReactElement {
               placeholder="Enter your password"
               autoComplete={mode === "signup" ? "new-password" : "current-password"}
               required
-              className="w-full rounded-xl border border-theme-border bg-theme-main py-3 pl-10 pr-11 text-sm text-theme-text outline-none focus:border-theme-text dark:border-white/20 dark:bg-black"
+              className="w-full rounded-xl border border-theme-border bg-theme-main py-3 pl-10 pr-11 text-sm text-theme-text outline-none focus:border-cyan-400/70 focus:ring-4 focus:ring-cyan-400/10 transition"
             />
             <button
               type="button"
@@ -118,7 +118,7 @@ export function AuthFormContainer(): React.ReactElement {
         <button
           type="submit"
           disabled={isSubmitting}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-theme-text px-4 py-3 text-sm font-semibold text-theme-main transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="btn-primary w-full"
         >
           <span>{isSubmitting ? "Signing in…" : mode === "login" ? "Sign in" : "Create account"}</span>
           {!isSubmitting && <ArrowRight className="h-4 w-4" />}
