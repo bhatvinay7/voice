@@ -299,7 +299,7 @@ export function AdminDataIngestion(): React.ReactElement {
             <button
               type="submit"
               disabled={addListingMutation.isPending || updateListingMutation.isPending}
-              className="bg-white dark:bg-black hover:bg-zinc-100 dark:hover:bg-zinc-900 text-black dark:text-white font-bold text-sm px-8 py-2.5 rounded-xl transition-all shadow-lg active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed border border-slate-300 dark:border-white/20"
+              className="btn-blue disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isEditing 
                 ? (updateListingMutation.isPending ? "Updating..." : "Update Property")

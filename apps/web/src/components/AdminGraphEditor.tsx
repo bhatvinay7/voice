@@ -108,16 +108,16 @@ export function AdminGraphEditor(): React.ReactElement {
       {/* Add New DAG Node Form */}
       <form
         onSubmit={handleAddNode}
-        className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-white dark:bg-black p-4 rounded-xl border border-slate-300 dark:border-white/20"
+        className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-theme-main p-4 rounded-xl border border-theme-border"
       >
         <div>
-          <label className="block text-xs font-semibold text-black dark:text-white mb-1">
+          <label className="block text-xs font-semibold text-theme-text mb-1">
             Workflow Step Type
           </label>
           <select
             value={stepType}
             onChange={(e) => handleStepTypeChange(e.target.value)}
-            className="w-full bg-white dark:bg-black border border-slate-300 dark:border-white/20 text-black dark:text-white rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-cyan-500"
+            className="w-full bg-theme-card border border-theme-border text-theme-text rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-cyan-500"
           >
             <option value="UserInputVerifier">1. UserInputVerifier (KYC / Sanitize)</option>
             <option value="RagFetchAndAgentAnalysis">2. RagFetchAndAgentAnalysis (Semantic RAG)</option>
@@ -130,7 +130,7 @@ export function AdminGraphEditor(): React.ReactElement {
         </div>
         <div className="md:col-span-2 flex items-end space-x-3">
           <div className="flex-1">
-            <label className="block text-xs font-semibold text-black dark:text-white mb-1">
+            <label className="block text-xs font-semibold text-theme-text mb-1">
               Workflow Instruction Text
             </label>
             <input
@@ -138,13 +138,13 @@ export function AdminGraphEditor(): React.ReactElement {
               placeholder="e.g. Guide buyer through Form F (MOU), developer NOC, and 4% DLD fee..."
               value={instruction}
               onChange={(e) => setInstruction(e.target.value)}
-              className="w-full bg-white dark:bg-black border border-slate-300 dark:border-white/20 text-black dark:text-white rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-cyan-500 placeholder:text-slate-400 dark:placeholder:text-zinc-500"
+              className="w-full bg-theme-card border border-theme-border text-theme-text rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-cyan-500 placeholder:text-theme-sub"
             />
           </div>
           <button
             type="submit"
             disabled={addNodeMutation.isPending}
-            className="flex items-center space-x-1.5 bg-white hover:bg-zinc-100 text-black dark:bg-black dark:text-white dark:hover:bg-zinc-900 dark:border-white/20 px-5 py-2 rounded-lg text-xs font-bold transition border border-slate-300 shrink-0"
+            className="btn-blue flex shrink-0 items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>{addNodeMutation.isPending ? "Adding..." : "Add Node"}</span>
@@ -200,18 +200,18 @@ export function AdminGraphEditor(): React.ReactElement {
                         rows={3}
                         value={editInstruction}
                         onChange={(e) => setEditInstruction(e.target.value)}
-                        className="w-full bg-white dark:bg-black border border-slate-300 dark:border-white/20 text-black dark:text-white rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-cyan-500"
+                        className="w-full bg-theme-card border border-theme-border text-theme-text rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-cyan-500"
                       />
                       <div className="flex gap-2">
                         <button
                           onClick={() => saveEdit(node.id)}
-                          className="flex items-center gap-1 text-xs bg-emerald-600 hover:bg-emerald-500 px-2.5 py-1 rounded font-bold text-white"
+                          className="btn-blue flex items-center gap-1 text-xs px-2.5 py-1"
                         >
                           <Check className="w-3 h-3" /> Save
                         </button>
                         <button
                           onClick={() => setEditingNodeId(null)}
-                          className="flex items-center gap-1 text-xs bg-zinc-700 hover:bg-zinc-600 px-2.5 py-1 rounded font-bold text-white"
+                          className="flex items-center gap-1 text-xs bg-theme-card hover:bg-theme-card-hover text-theme-text border border-theme-border px-2.5 py-1 rounded font-bold transition"
                         >
                           <X className="w-3 h-3" /> Cancel
                         </button>
