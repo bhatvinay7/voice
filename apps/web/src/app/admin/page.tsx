@@ -16,7 +16,6 @@ import { ShieldAlert, Sparkles, Layers } from "lucide-react";
 import { AdminTab } from "../../../types/admin";
 
 export default function AdminPortalPage() {
-  const [agentModeActive, setAgentModeActive] = useState(true);
   const [activeTab, setActiveTab] = useState<AdminTab>("all");
   const { data: userData, isLoading } = useUserProfile();
 
@@ -114,26 +113,22 @@ export default function AdminPortalPage() {
             <AdminErrorBoundary title="Contract Review Queue">
               <AdminContractReview />
             </AdminErrorBoundary>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
-              <AdminErrorBoundary title="Call Summaries">
-                <AdminCallSummaries />
-              </AdminErrorBoundary>
-              <AdminErrorBoundary title="Logs Console">
-                <AdminLogsConsole />
-              </AdminErrorBoundary>
-            </div>
+            <AdminErrorBoundary title="Call Summaries">
+              <AdminCallSummaries />
+            </AdminErrorBoundary>
+            <AdminErrorBoundary title="Logs Console">
+              <AdminLogsConsole />
+            </AdminErrorBoundary>
           </motion.div>
         );
     }
   };
 
   return (
-    <div className="min-h-screen bg-theme-main text-theme-text font-sans antialiased overflow-x-hidden transition-colors duration-300">
+    <div className="theme-page min-h-screen bg-theme-main text-theme-text font-sans antialiased overflow-x-clip transition-colors duration-300">
       <div className="relative z-10 flex flex-col min-h-screen">
         <Header
           user={user}
-          agentModeActive={agentModeActive}
-          onToggleAgentMode={setAgentModeActive}
         />
 
         <main className="flex-1 w-full max-w-[1920px] pt-20 pb-12 pl-2 sm:pl-3 lg:pl-4 xl:pl-5 pr-3 sm:pr-6 lg:pr-8 mx-auto">
@@ -160,12 +155,12 @@ export default function AdminPortalPage() {
                     </div>
                     <div className="space-y-1.5">
                       <div className="flex items-center gap-3">
-                        <h2 className="text-2xl sm:text-3xl font-extrabold text-theme-text tracking-tight font-serif">
-                          SaaS Admin Control Center
+                        <h2 className="text-2xl sm:text-3xl font-semibold text-theme-text tracking-tight font-display">
+                          Admin Console
                         </h2>
                       </div>
                       <p className="text-xs sm:text-sm text-theme-sub max-w-xl leading-relaxed">
-                        Manage PostgreSQL & Vector DB embeddings, Memgraph DAG workflow state machines, contract queues, and audio summaries.
+                        Manage listings, conversation flows, contracts and customer calls in one place.
                       </p>
                     </div>
                   </div>
@@ -173,7 +168,7 @@ export default function AdminPortalPage() {
                   <div className="relative z-10 self-start md:self-center flex items-center gap-2">
                     <span className="inline-flex items-center gap-2 text-xs font-mono bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 px-3.5 py-1.5 rounded-full font-bold shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]">
                       <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-                      ROLE: ADMINISTRATOR
+                      Administrator
                     </span>
                   </div>
                 </motion.div>
