@@ -23,7 +23,9 @@ pub async fn init_call_session(
     State(state): State<AppState>,
     Json(payload): Json<CallReq>,
 ) -> impl IntoResponse {
-    if payload.call_id.starts_with("phone:") { return phone_route_denied(); }
+    if payload.call_id.starts_with("phone:") {
+        return phone_route_denied();
+    }
     let token = match livekit_api::access_token::AccessToken::with_api_key(
         &state.config.livekit_api_key,
         &state.config.livekit_api_secret,
@@ -53,15 +55,35 @@ pub async fn init_call_session(
         }
     };
 
-    let acquired = match state.slots.acquire(&payload.call_id, chrono::Utc::now().timestamp()) {
+    let acquired = match state
+        .slots
+        .acquire(&payload.call_id, chrono::Utc::now().timestamp())
+    {
         Ok(acquired) => acquired,
-        Err(error) => return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": error}))).into_response(),
+        Err(error) => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"success": false, "error": error})),
+            )
+                .into_response()
+        }
     };
-    if acquired && state.orch_tx.try_send(QueueEvent::SessionStarted {
-        session_id: payload.call_id.clone(), user_id: payload.user_id.clone(), language: "en".into(),
-    }).is_err() {
+    if acquired
+        && state
+            .orch_tx
+            .try_send(QueueEvent::SessionStarted {
+                session_id: payload.call_id.clone(),
+                user_id: payload.user_id.clone(),
+                language: state.config.stt_language.clone(),
+            })
+            .is_err()
+    {
         let _ = state.slots.release(&payload.call_id);
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "session queue unavailable"}))).into_response();
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"success": false, "error": "session queue unavailable"})),
+        )
+            .into_response();
     }
 
     (
@@ -86,7 +108,9 @@ pub async fn get_cached_suggestions(
     Path(session_id): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    if session_id.starts_with("phone:") { return phone_route_denied(); }
+    if session_id.starts_with("phone:") {
+        return phone_route_denied();
+    }
     let cache_key = format!("session:{}:suggestions", session_id);
     match state.db.get_json(&cache_key).await {
         Ok(Some(json_str)) => {
@@ -114,7 +138,9 @@ pub async fn sse_suggestions_handler(
                 .into_response();
         }
     };
-    if call_id.starts_with("phone:") { return phone_route_denied(); }
+    if call_id.starts_with("phone:") {
+        return phone_route_denied();
+    }
     let rx = state.pubsub.subscribe();
     let stream =
         tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |msg| match msg {
@@ -147,7 +173,9 @@ pub async fn pause_call_handler(
     State(state): State<AppState>,
     Json(payload): Json<PauseCallReq>,
 ) -> impl IntoResponse {
-    if payload.session_id.starts_with("phone:") { return phone_route_denied(); }
+    if payload.session_id.starts_with("phone:") {
+        return phone_route_denied();
+    }
     let _ = state
         .orch_tx
         .send(QueueEvent::InterviewerSpeech {
@@ -157,14 +185,17 @@ pub async fn pause_call_handler(
         })
         .await;
 
-    Json(json!({ "success": true, "session_id": payload.session_id, "paused": payload.paused })).into_response()
+    Json(json!({ "success": true, "session_id": payload.session_id, "paused": payload.paused }))
+        .into_response()
 }
 
 pub async fn end_call_session(
     State(state): State<AppState>,
     Json(payload): Json<CallReq>,
 ) -> impl IntoResponse {
-    if payload.call_id.starts_with("phone:") { return phone_route_denied(); }
+    if payload.call_id.starts_with("phone:") {
+        return phone_route_denied();
+    }
     let _ = state
         .orch_tx
         .send(QueueEvent::SessionCancelled {
@@ -176,9 +207,14 @@ pub async fn end_call_session(
         "success": true,
         "call_id": payload.call_id,
         "recording_status": "finalizing"
-    })).into_response()
+    }))
+    .into_response()
 }
 
 pub(super) fn phone_route_denied() -> axum::response::Response {
-    (axum::http::StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Call is not available through the web API"}))).into_response()
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(json!({"success": false, "error": "Call is not available through the web API"})),
+    )
+        .into_response()
 }
