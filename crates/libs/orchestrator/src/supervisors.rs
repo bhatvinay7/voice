@@ -1,4 +1,7 @@
-use crate::models::{ConversationEvent, S3DumpData, StsPipelineCmd, StsPipelineEvent, TtsAudioPacket, WebRtcAudioChunk};
+use crate::models::{
+    ConversationEvent, S3DumpData, StsPipelineCmd, StsPipelineEvent, TtsAudioPacket,
+    WebRtcAudioChunk,
+};
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
 use tokio::sync::{broadcast, mpsc};
@@ -19,7 +22,13 @@ pub async fn run_s3_conversation_fanout(
                 match rx.recv().await {
                     Ok(event) if event.session_id == session_id => {
                         let payload = format!("{}: {}", event.event_type, event.payload_json);
-                        if let Err(error) = s3_tx.send(S3DumpData::Text { session_id: session_id.clone(), payload }).await {
+                        if let Err(error) = s3_tx
+                            .send(S3DumpData::Text {
+                                session_id: session_id.clone(),
+                                payload,
+                            })
+                            .await
+                        {
                             warn!(%session_id, %error, "S3 conversation subscriber stopped");
                             return;
                         }
@@ -34,12 +43,17 @@ pub async fn run_s3_conversation_fanout(
         });
         if let Err(panic) = fut.catch_unwind().await {
             error!(%session_id, ?panic, "S3 conversation subscriber panicked; restarting");
-        } else { return; }
+        } else {
+            return;
+        }
     }
 }
 
-/// Per-session Redis subscriber. It appends only to the session-named Redis stream;
-/// the conversation worker later fetches that same stream and writes Neon.
+/// Per-session Redis subscriber. Appends **only `Relevant`** events to the
+/// session Redis stream so the AI's context window stays clean.
+///
+/// `Irrelevant` events (off-domain fallback exchanges) are silently dropped here;
+/// they were already written to S3 by `run_s3_conversation_fanout` for audit.
 pub async fn run_redis_conversation_fanout(
     session_id: String,
     mut rx: broadcast::Receiver<ConversationEvent>,
@@ -50,9 +64,25 @@ pub async fn run_redis_conversation_fanout(
             loop {
                 match rx.recv().await {
                     Ok(event) if event.session_id == session_id => {
-                        if let Err(error) = db.append_conversation_to_redis(
-                            &event.session_id, &event.trace_id, &event.event_type, &event.payload_json,
-                        ).await {
+                        // ── Relevance gate ────────────────────────────────────────────
+                        // Skip Irrelevant turns so the AI's live context window only
+                        // contains domain-relevant exchanges.
+                        if !event.relevance.is_relevant() {
+                            tracing::debug!(
+                                %session_id, event_type = %event.event_type,
+                                "Redis conversation fanout: skipping Irrelevant turn"
+                            );
+                            continue;
+                        }
+                        if let Err(error) = db
+                            .append_conversation_to_redis(
+                                &event.session_id,
+                                &event.trace_id,
+                                &event.event_type,
+                                &event.payload_json,
+                            )
+                            .await
+                        {
                             warn!(%session_id, %error, "Conversation Redis append failed; broadcast subscriber will continue");
                         }
                     }
@@ -66,7 +96,9 @@ pub async fn run_redis_conversation_fanout(
         });
         if let Err(panic) = fut.catch_unwind().await {
             error!(%session_id, ?panic, "Redis conversation subscriber panicked; restarting");
-        } else { return; }
+        } else {
+            return;
+        }
     }
 }
 
@@ -108,7 +140,9 @@ pub async fn run_sts_pipeline(
         let fut = AssertUnwindSafe(async {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    StsPipelineCmd::InjectContext { text } => {
+                    StsPipelineCmd::InjectContext { text }
+                    | StsPipelineCmd::InjectFastContext { text }
+                    | StsPipelineCmd::InjectAgentContext { text } => {
                         println!(
                             "[STS Supervisor] Sending RAG Context to STS model: {}",
                             text
@@ -181,7 +215,9 @@ pub async fn run_s3_dump_pipeline(session_id: String, mut rx: mpsc::Receiver<S3D
                         session_id: event_session,
                         payload,
                     } => {
-                        if event_session == session_id && transcript.len().saturating_add(payload.len() + 1) <= max_audio_bytes {
+                        if event_session == session_id
+                            && transcript.len().saturating_add(payload.len() + 1) <= max_audio_bytes
+                        {
                             transcript.push_str(&payload);
                             transcript.push('\n');
                         }
