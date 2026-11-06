@@ -19,8 +19,9 @@ module.exports = {
         },
       },
       fontFamily: {
-        serif: ["var(--font-serif)", "Instrument Serif", "Georgia", "serif"],
-        sans: ["var(--font-sans)", "Inter", "sans-serif"],
+        serif: ["var(--font-sans)", "Manrope", "sans-serif"],
+        sans: ["var(--font-sans)", "Manrope", "sans-serif"],
+        display: ["var(--font-sans)", "Manrope", "sans-serif"],
       },
       animation: {
         "meteor-effect": "meteor 5s linear infinite",
