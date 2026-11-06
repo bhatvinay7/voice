@@ -144,7 +144,10 @@ pub async fn inbound_handler(
             Err(error) => api_error(StatusCode::SERVICE_UNAVAILABLE, &error),
         };
     }
-    if let Err(error) = state.slots.acquire(&session_id, chrono::Utc::now().timestamp()) {
+    if let Err(error) = state
+        .slots
+        .acquire(&session_id, chrono::Utc::now().timestamp())
+    {
         state.phone_media.close(&session_id);
         return api_error(StatusCode::SERVICE_UNAVAILABLE, &error);
     }
