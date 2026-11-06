@@ -3,6 +3,20 @@ use db::PropertyListing;
 pub struct AgentContextReasoner;
 
 impl AgentContextReasoner {
+    /// A bare confirmation such as "yes" or "no" follows the active listing
+    /// unless it explicitly asks for a new
+    /// search.  It must stay on the cached-context path; a search cannot make
+    /// an underspecified question more precise.
+    pub fn is_contextual_follow_up(query: &str, configured_phrases: &[String]) -> bool {
+        let normalized = query
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect::<String>();
+        let compact = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+        configured_phrases.iter().any(|phrase| phrase == &compact)
+    }
+
     /// Checks whether the user's inquiry is unrelated to real estate, properties, viewing slots, or tenancy procedures.
     pub fn is_unrelated_query(query: &str) -> bool {
         let lower = query.to_lowercase();
@@ -111,8 +125,20 @@ impl AgentContextReasoner {
     pub fn answer_from_cached_context(
         listing: &PropertyListing,
         user_prompt: &str,
+        contextual_follow_up_phrases: &[String],
+        contextual_follow_up_clarification: &str,
     ) -> Option<String> {
         let lower = user_prompt.to_lowercase();
+
+        // Bare confirmations have no searchable criteria. Ask only for the
+        // missing subject; never turn this into a full-listing recap.
+        if Self::is_contextual_follow_up(&lower, contextual_follow_up_phrases) {
+            let clarification = contextual_follow_up_clarification
+                .replace("__PROPERTY_TITLE__", &listing.title)
+                .trim()
+                .to_string();
+            return (!clarification.is_empty()).then_some(clarification);
+        }
 
         // 1. Check if the user is asking for a completely DIFFERENT search or location.
         // Scope checks happen after retrieval so this cache shortcut never blocks RAG.
@@ -183,13 +209,13 @@ impl AgentContextReasoner {
         {
             let pricing_str = if listing.listing_type == "buy" {
                 format!(
-                    "The purchase price for {} in {} is AED {}. Standard escrow milestones and registration terms apply.",
-                    listing.title, listing.location, listing.price_aed
+                    "The purchase price for {} is AED {}.",
+                    listing.title, listing.price_aed
                 )
             } else {
                 format!(
-                    "The annual rent for {} in {} is AED {} per year. In the UAE, rental payments are typically scheduled in 1 to 4 cheques.",
-                    listing.title, listing.location, listing.price_aed
+                    "The annual rent for {} is AED {} per year.",
+                    listing.title, listing.price_aed
                 )
             };
             return Some(pricing_str);
