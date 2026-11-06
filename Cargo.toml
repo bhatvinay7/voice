@@ -5,10 +5,11 @@ members = [
     "crates/libs/pubsub",
     "crates/libs/db",
     "crates/libs/rag",
+    "crates/libs/workflow",
     "crates/libs/orchestrator",
     "crates/libs/agent",
     "crates/services/server",
-    "crates/services/scheduler",
+    "crates/services/control-plane",
     "crates/services/worker",
     "tests",
 ]
@@ -42,3 +43,4 @@ livekit-api = { version = "0.8.1", features = ["native-tls", "rustls-tls-native-
 tokio-tungstenite = { version = "0.29", features = ["native-tls", "rustls-tls-native-roots"] }
 tungstenite = { version = "0.29", features = ["native-tls", "rustls-tls-native-roots"] }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+base64 = "0.22"
