@@ -23,17 +23,19 @@ pub fn init_crypto_provider() {
 
 pub fn get_jwt_secret() -> Result<Vec<u8>, String> {
     std::env::var("JWT_SECRET")
-        .ok().filter(|s| !s.trim().is_empty()).map(String::into_bytes)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(String::into_bytes)
         .ok_or_else(|| "JWT_SECRET environment variable is missing from .env".to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct JwtClaims {
-    pub sub: String,       // user_id
-    pub email: String,     // user email
-    pub role: String,      // "admin" or "user"
-    pub exp: usize,        // expiration epoch timestamp
-    pub iat: usize,        // issued-at epoch timestamp
+    pub sub: String,   // user_id
+    pub email: String, // user email
+    pub role: String,  // "admin" or "user"
+    pub exp: usize,    // expiration epoch timestamp
+    pub iat: usize,    // issued-at epoch timestamp
 }
 
 pub fn create_jwt_token(user_id: &str, email: &str, role: &str) -> Result<String, String> {
@@ -71,10 +73,7 @@ pub fn verify_jwt_token(token: &str) -> Result<JwtClaims, String> {
 }
 
 /// Axum Middleware checking that the request has a valid JWT with role == "admin"
-pub async fn require_admin_role_middleware(
-    mut req: Request,
-    next: Next,
-) -> Response {
+pub async fn require_admin_role_middleware(mut req: Request, next: Next) -> Response {
     let auth_header = req
         .headers()
         .get("Authorization")
@@ -127,10 +126,7 @@ pub async fn require_admin_role_middleware(
 
 /// Axum Middleware checking that the request has a valid JWT (any authenticated role)
 #[allow(dead_code)]
-pub async fn require_auth_middleware(
-    mut req: Request,
-    next: Next,
-) -> Response {
+pub async fn require_auth_middleware(mut req: Request, next: Next) -> Response {
     let auth_header = req
         .headers()
         .get("Authorization")
@@ -223,15 +219,31 @@ impl FromRequestParts<AppState> for AuthUser {
             }
         };
 
-        let user = match state.db.get_user(&claims.sub).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())? {
+        let user = match state.db.get_user(&claims.sub).await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"success": false, "error": "Database unavailable"})),
+            )
+                .into_response()
+        })? {
             Some(u) => u,
-            None => state.db.upsert_user(
-                &claims.sub,
-                "User",
-                &claims.email,
-                &claims.role,
-                "jwt",
-            ).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())?,
+            None => state
+                .db
+                .upsert_user(
+                    &claims.sub,
+                    claims.email.split('@').next().unwrap_or(""),
+                    &claims.email,
+                    &claims.role,
+                    "jwt",
+                )
+                .await
+                .map_err(|_| {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"success": false, "error": "Database unavailable"})),
+                    )
+                        .into_response()
+                })?,
         };
 
         Ok(AuthUser(user))
@@ -282,9 +294,21 @@ impl FromRequestParts<AppState> for AdminUser {
             }
         };
 
-        let user = match state.db.get_user(&claims.sub).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"success": false, "error": "Database unavailable"}))).into_response())? {
+        let user = match state.db.get_user(&claims.sub).await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"success": false, "error": "Database unavailable"})),
+            )
+                .into_response()
+        })? {
             Some(u) => u,
-            None => return Err((StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Unknown user"}))).into_response()),
+            None => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"success": false, "error": "Unknown user"})),
+                )
+                    .into_response())
+            }
         };
 
         // Check Neon on every protected request. A role change takes effect
@@ -296,7 +320,8 @@ impl FromRequestParts<AppState> for AdminUser {
                     "success": false,
                     "error": "Forbidden: Administrator role required"
                 })),
-            ).into_response());
+            )
+                .into_response());
         }
 
         Ok(AdminUser(user))
@@ -313,7 +338,10 @@ mod tests {
         let _ = dotenvy::from_path("../.env");
         let _ = dotenvy::from_path("../../.env");
         if std::env::var("JWT_SECRET").is_err() {
-            std::env::set_var("JWT_SECRET", "uae-real-estate-rbac-jwt-secret-key-2026-prod-grade");
+            std::env::set_var(
+                "JWT_SECRET",
+                "uae-real-estate-rbac-jwt-secret-key-2026-prod-grade",
+            );
         }
     }
 
@@ -322,7 +350,7 @@ mod tests {
         setup_test_env();
         let token = create_jwt_token("user-admin-1", "admin@realestate.ae", "admin")
             .expect("Token creation should succeed");
-        
+
         let claims = verify_jwt_token(&token).expect("Token verification should succeed");
         assert_eq!(claims.sub, "user-admin-1");
         assert_eq!(claims.email, "admin@realestate.ae");
@@ -357,7 +385,9 @@ mod tests {
         setup_test_env();
         let legacy_token = "user-legacy-1:admin";
         let res = verify_jwt_token(legacy_token);
-        assert!(res.is_err(), "Legacy unverified format must strictly be rejected");
+        assert!(
+            res.is_err(),
+            "Legacy unverified format must strictly be rejected"
+        );
     }
 }
-
