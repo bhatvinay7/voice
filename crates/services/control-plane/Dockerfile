@@ -20,15 +20,15 @@ ENV CARGO_HTTP_TIMEOUT=120
 # Copy the entire workspace
 COPY . .
 
-# Build the scheduler
-RUN cargo build --release --bin scheduler
+# Build the control-plane
+RUN cargo build --release --bin control-plane
 
 # Stage 2: Runner
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-COPY --from=builder /app/target/release/scheduler /app/scheduler
+COPY --from=builder /app/target/release/control-plane /app/control-plane
 
 EXPOSE 50051 9090
-CMD ["/app/scheduler"]
+CMD ["/app/control-plane"]

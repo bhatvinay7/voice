@@ -1,7 +1,7 @@
 use axum::{routing::get, Router};
+use control_plane::grpc::cell_control_server::CellControlServer;
+use control_plane::{CellControlService, SchedulerState};
 use prometheus::{Encoder, TextEncoder};
-use scheduler::grpc::cell_control_server::CellControlServer;
-use scheduler::{CellControlService, SchedulerState};
 use std::net::SocketAddr;
 use tonic::transport::Server;
 
@@ -18,14 +18,14 @@ async fn metrics_handler() -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    println!("[Scheduler] Starting scheduler service...");
+    println!("[Scheduler] Starting control-plane service...");
     let grpc_port: u16 = std::env::var("GRPC_PORT")
-        .or_else(|_| std::env::var("SCHEDULER_PORT"))
+        .or_else(|_| std::env::var("CONTROL_PLANE_PORT"))
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(50051);
     let http_port: u16 = std::env::var("METRICS_PORT")
-        .or_else(|_| std::env::var("SCHEDULER_METRICS_PORT"))
+        .or_else(|_| std::env::var("CONTROL_PLANE_METRICS_PORT"))
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(9090);
@@ -56,13 +56,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let db = db::DatabaseStore::new();
-    db.initialize().await.expect("Neon database unavailable or migrations missing");
-    let tool_service = scheduler::tool_service::ToolExecutionServiceImpl { db };
+    db.initialize()
+        .await
+        .expect("Neon database unavailable or migrations missing");
+    let tool_service = control_plane::tool_service::ToolExecutionServiceImpl { db };
 
     Server::builder()
         .add_service(CellControlServer::new(service))
         .add_service(
-            scheduler::tools_grpc::tool_execution_service_server::ToolExecutionServiceServer::new(
+            control_plane::tools_grpc::tool_execution_service_server::ToolExecutionServiceServer::new(
                 tool_service,
             ),
         )
