@@ -1,10 +1,11 @@
-use axum::{extract::State, response::IntoResponse, Json};
-use serde::Deserialize;
-use serde_json::json;
-use crate::AppState;
 use crate::api::rbac::create_jwt_token;
 use crate::api::AdminUser;
+use crate::AppState;
+use axum::{extract::State, response::IntoResponse, Json};
 use db::{AdminGraphNode, KnowledgeDocument, PropertyListing};
+use serde::Deserialize;
+use serde_json::json;
+use workflow::WorkflowRepository;
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -21,8 +22,13 @@ pub async fn admin_login(
     // Authorization comes exclusively from the durable Neon user role.
     let user = match db_try!(state.db.get_user_by_email(&payload.email)) {
         Some(user) => user,
-        None => return (axum::http::StatusCode::UNAUTHORIZED,
-            Json(json!({"success": false, "error": "Unknown user"}))).into_response(),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"success": false, "error": "Unknown user"})),
+            )
+                .into_response()
+        }
     };
 
     if user.role != "admin" {
@@ -105,7 +111,7 @@ pub async fn admin_get_graph(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let nodes = db_try!(state.db.get_graph_nodes());
+    let nodes = db_try!(WorkflowRepository::new(state.db.clone()).fetch());
     Json(json!({ "success": true, "graph_nodes": nodes })).into_response()
 }
 
@@ -114,7 +120,7 @@ pub async fn admin_add_graph_node(
     State(state): State<AppState>,
     Json(payload): Json<AdminGraphNode>,
 ) -> impl IntoResponse {
-    db_try!(state.db.add_graph_node(payload.clone()));
+    db_try!(WorkflowRepository::new(state.db.clone()).create(payload.clone()));
     Json(json!({ "success": true, "node": payload })).into_response()
 }
 
@@ -129,7 +135,9 @@ pub async fn admin_update_graph_node(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(payload): Json<UpdateGraphNodeReq>,
 ) -> impl IntoResponse {
-    let updated = db_try!(state.db.update_graph_node(&id, payload.instruction));
+    let updated = db_try!(
+        WorkflowRepository::new(state.db.clone()).update_instruction(&id, &payload.instruction)
+    );
     Json(json!({ "success": updated })).into_response()
 }
 
@@ -138,19 +146,19 @@ pub async fn admin_delete_graph_node(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let deleted = db_try!(state.db.delete_graph_node(&id));
+    let deleted = db_try!(WorkflowRepository::new(state.db.clone()).delete(&id));
     Json(json!({ "success": deleted })).into_response()
 }
 
-pub async fn admin_get_logs(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn admin_get_logs(_admin: AdminUser, State(state): State<AppState>) -> impl IntoResponse {
     match state.db.load_recent_stream_events().await {
         Ok(events) => {
-            let events: Vec<_> = events.into_iter().filter(|event| !event.session_id.starts_with("phone:")).collect();
+            let events: Vec<_> = events
+                .into_iter()
+                .filter(|event| !event.session_id.starts_with("phone:"))
+                .collect();
             Json(json!({ "success": true, "logs": events })).into_response()
-        },
+        }
         Err(error) => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "success": false, "error": error })),
@@ -159,63 +167,16 @@ pub async fn admin_get_logs(
     }
 }
 
-pub async fn admin_get_call_summaries(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    let recordings = match state.db.load_call_endpoints().await {
-        Ok(recordings) => recordings,
-        Err(error) => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "success": false, "error": error })),
-            )
-                .into_response();
-        }
-    };
-    let summaries = match state.db.load_call_summaries().await {
-        Ok(summaries) => summaries,
-        Err(error) => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "success": false, "error": error })),
-            )
-                .into_response();
-        }
-    };
-    let enriched: Vec<serde_json::Value> = recordings
-        .iter()
-        .filter(|record| !record.session_id.starts_with("phone:"))
-        .map(|record| {
-            let summary = summaries.iter().find(|summary| summary.call_id == record.session_id);
-            let created_at_readable = chrono::DateTime::parse_from_rfc3339(&record.created_at)
-                .map(|time| time.format("%d %b %Y, %H:%M UTC").to_string())
-                .unwrap_or_else(|_| record.created_at.clone());
-            json!({
-                "call_id": record.session_id,
-                "text_presigned_url": record.text_url,
-                "audio_presigned_url": orchestrator::r2_storage::presign_conversation_url(&state.config, &record.session_id).ok(),
-                "audio_filename": format!("{}.wav", record.session_id),
-                "summary": summary.map(|summary| summary.summary.as_str()),
-                "user_id": summary.map(|summary| summary.user_id.as_str()),
-                "duration_seconds": summary.map(|summary| summary.duration_seconds),
-                "qualified_budget_aed": summary.map(|summary| summary.qualified_budget_aed),
-                "preferred_location": summary.map(|summary| summary.preferred_location.as_str()),
-                "created_at": record.created_at,
-                "created_at_readable": created_at_readable,
-            })
-        })
-        .collect();
-    Json(json!({ "success": true, "summaries": enriched })).into_response()
-}
-
+pub use super::admin_calls::admin_get_call_summaries;
 
 pub async fn admin_get_session_details(
     _admin: AdminUser,
     State(state): State<AppState>,
     axum::extract::Path(session_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    if session_id.starts_with("phone:") { return super::calls::phone_route_denied(); }
+    if session_id.starts_with("phone:") {
+        return super::calls::phone_route_denied();
+    }
     let summary = match state.db.load_call_summary(&session_id).await {
         Ok(summary) => summary,
         Err(error) => {
@@ -258,11 +219,11 @@ pub async fn admin_get_session_details(
         .filter(|e| e.stream == "stream:logs")
         .collect();
 
-    let endpoints = state
-        .db
-        .load_call_endpoints()
-        .await
-        .map(|records| records.into_iter().find(|record| record.session_id == session_id));
+    let endpoints = state.db.load_call_endpoints().await.map(|records| {
+        records
+            .into_iter()
+            .find(|record| record.session_id == session_id)
+    });
     let endpoints = match endpoints {
         Ok(Some(mut record)) => {
             match orchestrator::r2_storage::presign_conversation_url(
@@ -291,48 +252,58 @@ pub async fn admin_get_session_details(
     };
 
     // Enrich summary with readable timings and audio file metadata
-    let enriched_summary = summary.as_ref().map(|s| {
-        let mins = s.duration_seconds / 60;
-        let secs = s.duration_seconds % 60;
-        let duration_readable = if mins > 0 {
-            format!("{}m {}s", mins, secs)
-        } else {
-            format!("{}s", secs)
-        };
-        let created_at_readable = chrono::DateTime::parse_from_rfc3339(&s.created_at)
-            .map(|dt| dt.format("%d %b %Y, %H:%M UTC").to_string())
-            .unwrap_or_else(|_| s.created_at.clone());
-        let audio_filename = s.audio_presigned_url.split('/').last().unwrap_or("recording.wav").to_string();
-        json!({
-            "call_id": s.call_id,
-            "user_id": s.user_id,
-            "duration_seconds": s.duration_seconds,
-            "duration_readable": duration_readable,
-            "audio_presigned_url": s.audio_presigned_url,
-            "audio_filename": audio_filename,
-            "text_presigned_url": s.text_presigned_url,
-            "summary": s.summary,
-            "qualified_budget_aed": s.qualified_budget_aed,
-            "preferred_location": s.preferred_location,
-            "created_at": s.created_at,
-            "created_at_readable": created_at_readable,
+    let enriched_summary = summary
+        .as_ref()
+        .map(|s| {
+            let mins = s.duration_seconds / 60;
+            let secs = s.duration_seconds % 60;
+            let duration_readable = if mins > 0 {
+                format!("{}m {}s", mins, secs)
+            } else {
+                format!("{}s", secs)
+            };
+            let created_at_readable = chrono::DateTime::parse_from_rfc3339(&s.created_at)
+                .map(|dt| dt.format("%d %b %Y, %H:%M UTC").to_string())
+                .unwrap_or_else(|_| s.created_at.clone());
+            let audio_filename = s
+                .audio_presigned_url
+                .split('/')
+                .last()
+                .unwrap_or("recording.wav")
+                .to_string();
+            json!({
+                "call_id": s.call_id,
+                "user_id": s.user_id,
+                "duration_seconds": s.duration_seconds,
+                "duration_readable": duration_readable,
+                "audio_presigned_url": s.audio_presigned_url,
+                "audio_filename": audio_filename,
+                "text_presigned_url": s.text_presigned_url,
+                "summary": s.summary,
+                "qualified_budget_aed": s.qualified_budget_aed,
+                "preferred_location": s.preferred_location,
+                "created_at": s.created_at,
+                "created_at_readable": created_at_readable,
+            })
         })
-    }).or_else(|| endpoints.as_ref().map(|record| {
-        let created_at_readable = chrono::DateTime::parse_from_rfc3339(&record.created_at)
-            .map(|time| time.format("%d %b %Y, %H:%M UTC").to_string())
-            .unwrap_or_else(|_| record.created_at.clone());
-        json!({
-            "call_id": record.session_id,
-            "duration_seconds": null,
-            "audio_presigned_url": record.audio_url,
-            "text_presigned_url": record.text_url,
-            "summary": null,
-            "qualified_budget_aed": null,
-            "preferred_location": null,
-            "created_at": record.created_at,
-            "created_at_readable": created_at_readable,
-        })
-    }));
+        .or_else(|| {
+            endpoints.as_ref().map(|record| {
+                let created_at_readable = chrono::DateTime::parse_from_rfc3339(&record.created_at)
+                    .map(|time| time.format("%d %b %Y, %H:%M UTC").to_string())
+                    .unwrap_or_else(|_| record.created_at.clone());
+                json!({
+                    "call_id": record.session_id,
+                    "duration_seconds": null,
+                    "audio_presigned_url": record.audio_url,
+                    "text_presigned_url": record.text_url,
+                    "summary": null,
+                    "qualified_budget_aed": null,
+                    "preferred_location": null,
+                    "created_at": record.created_at,
+                    "created_at_readable": created_at_readable,
+                })
+            })
+        });
 
     Json(json!({
         "success": true,
@@ -345,7 +316,7 @@ pub async fn admin_get_session_details(
         "logs": logs_events,
         "raw_events": session_events
     }))
-        .into_response()
+    .into_response()
 }
 
 pub async fn admin_add_knowledge_doc(
@@ -356,7 +327,10 @@ pub async fn admin_add_knowledge_doc(
     db_try!(state.db.add_knowledge_document(payload.clone()));
 
     if let Err(e) = state.rag.upsert_document_to_vector(&payload).await {
-        eprintln!("Failed to upsert knowledge document to Upstash Vector: {}", e);
+        eprintln!(
+            "Failed to upsert knowledge document to Upstash Vector: {}",
+            e
+        );
     }
 
     Json(json!({ "success": true, "document": payload })).into_response()
@@ -369,4 +343,3 @@ pub async fn admin_get_knowledge_docs(
     let docs = db_try!(state.db.get_knowledge_documents());
     Json(json!({ "success": true, "documents": docs })).into_response()
 }
-

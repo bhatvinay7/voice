@@ -1,8 +1,8 @@
+use crate::api::rbac::{create_jwt_token, verify_jwt_token};
+use crate::AppState;
 use axum::{extract::State, response::IntoResponse, Json};
 use serde::Deserialize;
 use serde_json::json;
-use crate::AppState;
-use crate::api::rbac::{create_jwt_token, verify_jwt_token};
 
 #[derive(Deserialize)]
 pub struct VerifyReq {
@@ -22,7 +22,7 @@ pub async fn verify_user(
         .db
         .push_redis_stream(
             "stream:audit",
-            "system",   // auth events are not scoped to a call session
+            "system", // auth events are not scoped to a call session
             &trace_id,
             "USER_VERIFIED",
             &json!({ "user_id": payload.user_id, "emirates_id": payload.emirates_id_number })
@@ -68,16 +68,18 @@ pub async fn auth_google(
         .send()
         .await
     {
-        Ok(response) if response.status().is_success() => match response.json::<GoogleTokenInfo>().await {
-            Ok(token_info) => token_info,
-            Err(_) => {
-                return (
+        Ok(response) if response.status().is_success() => {
+            match response.json::<GoogleTokenInfo>().await {
+                Ok(token_info) => token_info,
+                Err(_) => {
+                    return (
                     axum::http::StatusCode::UNAUTHORIZED,
                     Json(json!({ "success": false, "error": "Google returned an invalid sign-in token" })),
                 )
                     .into_response();
+                }
             }
-        },
+        }
         Ok(_) => {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
@@ -96,8 +98,8 @@ pub async fn auth_google(
 
     let email_is_verified = token_info.email_verified == serde_json::Value::Bool(true)
         || token_info.email_verified == serde_json::Value::String("true".to_string());
-    let issuer_is_valid = token_info.iss == "accounts.google.com"
-        || token_info.iss == "https://accounts.google.com";
+    let issuer_is_valid =
+        token_info.iss == "accounts.google.com" || token_info.iss == "https://accounts.google.com";
     if token_info.aud != client_id
         || !issuer_is_valid
         || !email_is_verified
@@ -106,18 +108,21 @@ pub async fn auth_google(
     {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
-            Json(json!({ "success": false, "error": "Google sign-in token could not be verified" })),
+            Json(
+                json!({ "success": false, "error": "Google sign-in token could not be verified" }),
+            ),
         )
             .into_response();
     }
 
-    let user_id = format!("user-{}", token_info.email.replace('@', "-").replace('.', "-"));
+    let user_id = format!(
+        "user-{}",
+        token_info.email.replace('@', "-").replace('.', "-")
+    );
     let display_name = token_info.name.unwrap_or_else(|| token_info.email.clone());
 
     // Check if user already exists in DB to preserve their manually configured role
-    let existing_role = db_try!(state
-        .db
-        .get_user(&user_id))
+    let existing_role = db_try!(state.db.get_user(&user_id))
         .or(db_try!(state.db.get_user_by_email(&token_info.email)))
         .map(|u| u.role)
         .unwrap_or_else(|| "user".to_string());
@@ -164,9 +169,7 @@ pub async fn auth_email(
     let display_name = payload.name.unwrap_or_default();
 
     // Check if user already exists in DB to preserve their manually configured role
-    let existing_role = db_try!(state
-        .db
-        .get_user(&user_id))
+    let existing_role = db_try!(state.db.get_user(&user_id))
         .or(db_try!(state.db.get_user_by_email(&payload.email)))
         .map(|u| u.role)
         .unwrap_or_else(|| "user".to_string());
