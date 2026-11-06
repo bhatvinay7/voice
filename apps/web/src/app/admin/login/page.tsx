@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { Shield, Lock, Mail, ArrowRight, AlertCircle, ArrowLeft, CheckCircle2 } from "lucide-react";
 import { useAdminLogin } from "../../../lib/api";
+import { AuthSplitLayout } from "../../../components/auth/AuthSplitLayout";
+import { adminAuthShowcase } from "../../../lib/auth-showcase";
 
 export default function AdminLoginPage() {
   const router = useRouter();
@@ -37,28 +39,25 @@ export default function AdminLoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-theme-main text-theme-text font-sans antialiased flex flex-col justify-center items-center p-4 sm:p-6 md:p-8 relative overflow-hidden transition-colors duration-300">
-      {/* Background Radial Glow */}
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-cyan-500/5 blur-[120px] rounded-full pointer-events-none" />
-
-      {/* Top back navigation */}
-      <div className="absolute top-8 left-8 z-20">
+    <AuthSplitLayout
+      content={adminAuthShowcase}
+      topSlot={
         <button
           onClick={() => router.push("/")}
-          className="inline-flex items-center gap-2 text-xs font-mono text-theme-sub hover:text-theme-text transition bg-theme-card dark:bg-black dark:text-white px-4 py-2 rounded-full border border-theme-border dark:border-white/20"
+          className="inline-flex items-center gap-2 text-xs text-theme-sub hover:text-theme-text transition bg-theme-card px-4 py-2 rounded-full border border-theme-border"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
-          Back to Portal
+          Back to home
         </button>
-      </div>
-
+      }
+    >
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
-        className="w-full max-w-md relative z-10"
+        className="w-full relative z-10"
       >
-        <div className="rounded-[2.5rem] border border-theme-border dark:border-white/15 bg-theme-card dark:bg-black backdrop-blur-2xl p-8 sm:p-10 text-theme-text dark:text-white shadow-2xl relative overflow-hidden dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]">
+        <div className="auth-card p-8 sm:p-10 text-theme-text relative overflow-hidden">
           {/* Top Specular Gradient Line */}
           <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-cyan-500 via-white to-cyan-400" />
 
@@ -68,16 +67,16 @@ export default function AdminLoginPage() {
               <Shield className="w-7 h-7" />
             </div>
             <div>
-              <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight font-serif text-theme-text dark:text-white">
-                Admin Control Login
+              <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight font-display text-theme-text">
+                Team sign in
               </h1>
-              <p className="text-xs text-theme-sub dark:text-zinc-400 mt-1 leading-relaxed">
-                Role-Based Endpoint Access. Role is verified dynamically from the database.
+              <p className="text-sm text-theme-sub mt-1 leading-relaxed">
+                Access is limited to authorised team members.
               </p>
             </div>
-            <div className="inline-flex items-center gap-1.5 text-[10px] font-mono bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 px-3 py-1 rounded-full font-bold">
+            <div className="inline-flex items-center gap-1.5 text-[11px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 px-3 py-1 rounded-full font-semibold">
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-              RESTRICTED: ADMIN ROLE REQUIRED
+              Restricted area
             </div>
           </div>
 
@@ -105,11 +104,11 @@ export default function AdminLoginPage() {
           )}
 
           {/* Form */}
-          <form onSubmit={handleSubmit} className="space-y-5 bg-white dark:bg-black">
+          <form onSubmit={handleSubmit} className="space-y-5 bg-transparent">
             <div className="space-y-1.5">
-              <label className="text-xs font-bold text-black dark:text-white font-mono flex items-center gap-1.5">
+              <label className="text-sm font-medium text-theme-text flex items-center gap-1.5">
                 <Mail className="w-3.5 h-3.5 text-cyan-400" />
-                Admin Email Address
+                Work email
               </label>
               <input
                 type="email"
@@ -117,12 +116,12 @@ export default function AdminLoginPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="name@company.com"
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-slate-300 dark:border-white/20 rounded-2xl text-sm text-black dark:text-white placeholder:text-slate-400 dark:placeholder:text-zinc-500 focus:outline-none focus:border-cyan-400/80 transition"
+                className="w-full px-4 py-3 bg-theme-main border border-theme-border rounded-2xl text-sm text-theme-text placeholder:text-theme-sub focus:outline-none focus:border-cyan-400/80 transition"
               />
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-bold text-black dark:text-white font-mono flex items-center gap-1.5">
+              <label className="text-sm font-medium text-theme-text flex items-center gap-1.5">
                 <Lock className="w-3.5 h-3.5 text-cyan-400" />
                 Password
               </label>
@@ -132,20 +131,20 @@ export default function AdminLoginPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-slate-300 dark:border-white/20 rounded-2xl text-sm text-black dark:text-white placeholder:text-slate-400 dark:placeholder:text-zinc-500 focus:outline-none focus:border-cyan-400/80 transition"
+                className="w-full px-4 py-3 bg-theme-main border border-theme-border rounded-2xl text-sm text-theme-text placeholder:text-theme-sub focus:outline-none focus:border-cyan-400/80 transition"
               />
             </div>
 
             <button
               type="submit"
               disabled={adminLoginMutation.isPending}
-              className="w-full mt-2 py-3.5 px-6 rounded-2xl bg-white dark:bg-black hover:bg-zinc-100 dark:hover:bg-zinc-900 border border-slate-300 dark:border-white/20 text-black dark:text-white font-bold text-sm flex items-center justify-center gap-2 transition-all shadow-xl active:scale-95 cursor-pointer disabled:opacity-50"
+              className="btn-primary w-full mt-2"
             >
               {adminLoginMutation.isPending ? (
-                <span>Authenticating with DB...</span>
+                <span>Signing in…</span>
               ) : (
                 <>
-                  <span>Sign In as Administrator</span>
+                  <span>Sign in</span>
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
@@ -155,17 +154,17 @@ export default function AdminLoginPage() {
           {/* Footer note */}
           <div className="mt-8 pt-6 border-t border-theme-border/50 text-center">
             <p className="text-xs text-theme-sub">
-              Need normal user access?{" "}
+              Looking for your customer account?{" "}
               <button
                 onClick={() => router.push("/auth")}
-                className="text-cyan-400 hover:underline font-bold"
+                className="text-cyan-400 hover:underline font-semibold"
               >
-                Sign In as Client
+                Customer sign in
               </button>
             </p>
           </div>
         </div>
       </motion.div>
-    </div>
+    </AuthSplitLayout>
   );
 }

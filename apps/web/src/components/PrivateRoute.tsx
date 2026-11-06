@@ -54,14 +54,14 @@ export function PrivateRoute({
           {requiredRole === "admin" ? (
             <button
               onClick={() => router.push("/admin/login")}
-              className="w-full bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-sm px-6 py-3 rounded-full transition-all shadow-md active:scale-95"
+              className="btn-blue w-full"
             >
               Sign In to Admin Portal
             </button>
           ) : (
             <button
               onClick={() => router.push("/auth")}
-              className="w-full bg-theme-text text-theme-main font-bold text-sm px-6 py-3 rounded-full hover:opacity-90 transition-all shadow-md active:scale-95"
+              className="btn-blue w-full"
             >
               Sign In to Continue
             </button>
@@ -95,7 +95,7 @@ export function PrivateRoute({
         <div className="flex flex-col sm:flex-row gap-3 pt-2">
           <button
             onClick={() => router.push("/admin/login")}
-            className="flex-1 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs sm:text-sm px-5 py-3 rounded-full transition-all shadow-md active:scale-95"
+            className="btn-blue flex-1"
           >
             Sign In with Admin Account
           </button>

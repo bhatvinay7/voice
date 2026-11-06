@@ -13,7 +13,7 @@ export function AuthOtpInput({
 }: AuthOtpInputProps): React.ReactElement {
   return (
     <div className="space-y-2">
-      <label className="text-xs font-bold text-black dark:text-white uppercase tracking-wider pl-1">
+      <label className="text-xs font-bold text-theme-text uppercase tracking-wider pl-1">
         6-Digit Verification Code
       </label>
       <div className="flex items-center justify-between gap-2">
@@ -26,7 +26,7 @@ export function AuthOtpInput({
             maxLength={1}
             value={digit}
             onChange={(e) => onChangeOtp(idx, e.target.value)}
-            className="w-12 h-14 bg-white dark:bg-black border border-slate-300 dark:border-white/20 text-center text-xl font-bold text-black dark:text-white rounded-2xl focus:outline-none focus:border-black dark:focus:border-white transition-all shadow-inner"
+            className="w-12 h-14 bg-theme-card border border-theme-border text-center text-xl font-bold text-theme-text rounded-2xl focus:outline-none focus:border-cyan-500 transition-all shadow-inner"
           />
         ))}
       </div>
