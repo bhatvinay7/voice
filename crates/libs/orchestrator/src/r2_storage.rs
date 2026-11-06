@@ -118,7 +118,12 @@ fn downmix_and_resample(samples: &[i16], sample_rate: u32, channels: u16) -> Vec
     resample_mono(&mono, sample_rate, 16_000, output_len)
 }
 
-fn resample_mono(samples: &[i16], source_rate: u32, target_rate: u32, output_len: usize) -> Vec<i16> {
+fn resample_mono(
+    samples: &[i16],
+    source_rate: u32,
+    target_rate: u32,
+    output_len: usize,
+) -> Vec<i16> {
     const SINC_RADIUS: isize = 16;
     let cutoff = (target_rate as f64 / source_rate as f64).min(1.0) * 0.95;
 
@@ -166,12 +171,27 @@ fn resample_mono(samples: &[i16], source_rate: u32, target_rate: u32, output_len
         .collect()
 }
 
-pub async fn upload_conversation(cfg: &AppConfig, session_id: &str, wav: &[u8]) -> Result<String, String> {
+pub async fn upload_conversation(
+    cfg: &AppConfig,
+    session_id: &str,
+    wav: &[u8],
+) -> Result<String, String> {
     upload_object(cfg, session_id, wav, "conversation.wav", "audio/wav").await
 }
 
-pub async fn upload_transcript(cfg: &AppConfig, session_id: &str, transcript: &str) -> Result<String, String> {
-    upload_object(cfg, session_id, transcript.as_bytes(), "transcript.txt", "text/plain; charset=utf-8").await
+pub async fn upload_transcript(
+    cfg: &AppConfig,
+    session_id: &str,
+    transcript: &str,
+) -> Result<String, String> {
+    upload_object(
+        cfg,
+        session_id,
+        transcript.as_bytes(),
+        "transcript.txt",
+        "text/plain; charset=utf-8",
+    )
+    .await
 }
 
 async fn upload_object(
@@ -212,17 +232,15 @@ async fn upload_object(
     let date_stamp = now.format("%Y%m%d").to_string();
     let payload_hash = sha256_hex(payload);
     let canonical_uri = parsed_url.path();
-    let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
+    let content_length = payload.len().to_string();
+    let signed_headers = "content-length;content-type;host;x-amz-content-sha256;x-amz-date";
     let canonical_headers = format!(
-        "content-type:{}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
-        content_type, host, payload_hash, amz_date
+        "content-length:{}\ncontent-type:{}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        content_length, content_type, host, payload_hash, amz_date
     );
     let canonical_request = format!(
         "PUT\n{}\n\n{}\n{}\n{}",
-        canonical_uri,
-        canonical_headers,
-        signed_headers,
-        payload_hash
+        canonical_uri, canonical_headers, signed_headers, payload_hash
     );
     let scope = format!("{}/auto/s3/aws4_request", date_stamp);
     let string_to_sign = format!(
@@ -239,6 +257,7 @@ async fn upload_object(
 
     let response = reqwest::Client::new()
         .put(parsed_url)
+        .header(reqwest::header::CONTENT_LENGTH, content_length)
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .header("host", host)
         .header("x-amz-content-sha256", payload_hash)
