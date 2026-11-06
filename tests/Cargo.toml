@@ -13,9 +13,10 @@ serde_json = { workspace = true }
 orchestrator = { path = "../crates/libs/orchestrator" }
 agent = { path = "../crates/libs/agent" }
 db = { path = "../crates/libs/db" }
-scheduler = { path = "../crates/services/scheduler" }
+control_plane = { package = "control-plane", path = "../crates/services/control-plane" }
 pubsub = { path = "../crates/libs/pubsub" }
 rag = { path = "../crates/libs/rag" }
+workflow = { path = "../crates/libs/workflow" }
 config = { path = "../crates/libs/config" }
 sled = "0.34.7"
 tonic = { workspace = true }
