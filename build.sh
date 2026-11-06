@@ -10,9 +10,9 @@ TAG=${TAG:-"latest"}
 echo "==== Building Backend Server ===="
 docker build -t $REGISTRY/real-estate-backend:$TAG -f crates/services/server/Dockerfile .
 
-if [ -f "crates/services/scheduler/Dockerfile" ]; then
-    echo "==== Building Scheduler Service ===="
-    docker build -t $REGISTRY/real-estate-scheduler:$TAG -f crates/services/scheduler/Dockerfile .
+if [ -f "crates/services/control-plane/Dockerfile" ]; then
+    echo "==== Building Control-plane Service ===="
+    docker build -t $REGISTRY/real-estate-control-plane:$TAG -f crates/services/control-plane/Dockerfile .
 fi
 
 if [ -f "crates/services/worker/Dockerfile" ]; then
@@ -32,8 +32,8 @@ fi
 if [ "$1" == "--push" ]; then
     echo "==== Pushing Images to Kubernetes Registry ($REGISTRY) ===="
     docker push $REGISTRY/real-estate-backend:$TAG
-    if [ -f "crates/services/scheduler/Dockerfile" ]; then
-        docker push $REGISTRY/real-estate-scheduler:$TAG
+    if [ -f "crates/services/control-plane/Dockerfile" ]; then
+        docker push $REGISTRY/real-estate-control-plane:$TAG
     fi
     if [ -f "crates/services/worker/Dockerfile" ]; then
         docker push $REGISTRY/real-estate-worker:$TAG
