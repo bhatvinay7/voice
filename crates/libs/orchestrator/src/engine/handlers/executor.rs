@@ -1,19 +1,25 @@
 use crate::grpc::tools::tool_execution_service_client::ToolExecutionServiceClient;
 use crate::models::{QueueEvent, TaskId, ToolEvent};
-use db::DatabaseStore;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
-/// Executes a tool request either remotely via gRPC or via in-process fallback
+/// Executes a tool request through the control-plane boundary.
+///
+/// The orchestrator deliberately has no local implementation of tools. Keeping
+/// a second path here caused tool behaviour to drift between single-process and
+/// deployed installations, and made cancellation/ownership ambiguous.
 pub async fn execute_tool(
     mut client: ToolExecutionServiceClient<Channel>,
-    db_local: DatabaseStore,
     q_tx: mpsc::Sender<QueueEvent>,
     run_id: String,
     task_id: TaskId,
     tool_name: String,
     args: serde_json::Value,
     attempt: u32,
+    query_id: Option<String>,
+    playback_generation: u64,
+    cancellation: CancellationToken,
 ) {
     let a_json = args.to_string();
     let req = tonic::Request::new(crate::grpc::tools::ToolRequest {
@@ -23,7 +29,20 @@ pub async fn execute_tool(
         args_json: a_json.clone(),
     });
 
-    let rpc_result = client.execute_tool(req).await;
+    let rpc_result = tokio::select! {
+        _ = cancellation.cancelled() => {
+            let _ = q_tx.send(QueueEvent::Tool(ToolEvent::Failed {
+                task_id,
+                attempt,
+                query_id,
+                playback_generation,
+                error: "Tool execution cancelled with its session".to_string(),
+                retryable: false,
+            })).await;
+            return;
+        }
+        result = client.execute_tool(req) => result,
+    };
     match rpc_result {
         Ok(resp) => {
             let inner = resp.into_inner();
@@ -38,6 +57,8 @@ pub async fn execute_tool(
                     .send(QueueEvent::Tool(ToolEvent::Done {
                         task_id,
                         attempt,
+                        query_id,
+                        playback_generation,
                         output: val,
                     }))
                     .await;
@@ -51,6 +72,8 @@ pub async fn execute_tool(
                     .send(QueueEvent::Tool(ToolEvent::Failed {
                         task_id,
                         attempt,
+                        query_id,
+                        playback_generation,
                         error: inner.error_message,
                         retryable: false,
                     }))
@@ -58,149 +81,21 @@ pub async fn execute_tool(
             }
         }
         Err(e) => {
-            tracing::info!(
-                "Remote gRPC tool service unavailable ({:?}), executing tool '{}' in-process fallback",
-                e.code(),
-                tool_name
+            tracing::warn!(
+                "Scheduler unavailable for tool '{}' ({:?})",
+                tool_name,
+                e.code()
             );
-            let output_val = execute_in_process_tool(&db_local, &tool_name, &args, &task_id.0).await;
             let _ = q_tx
-                .send(QueueEvent::Tool(ToolEvent::Done {
+                .send(QueueEvent::Tool(ToolEvent::Failed {
                     task_id,
                     attempt,
-                    output: output_val,
+                    query_id,
+                    playback_generation,
+                    error: "Tool scheduler is unavailable".to_string(),
+                    retryable: true,
                 }))
                 .await;
         }
     }
-}
-
-/// Fallback in-process execution for local operations
-pub async fn execute_in_process_tool(
-    db_local: &DatabaseStore,
-    tool_name: &str,
-    args: &serde_json::Value,
-    task_id_str: &str,
-) -> serde_json::Value {
-    match tool_name {
-        "book_viewing_slot" => {
-            let listing_id = args
-                .get("listing_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let user_id = args
-                .get("user_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let slot_time = args
-                .get("slot_time")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let idemp = format!("idemp-{}", task_id_str);
-            let res = match db_local.book_viewing_slot(listing_id, user_id, slot_time, &idemp).await { Ok(value) => value, Err(_) => return serde_json::json!({"success": false, "response_text": "Database unavailable"}) };
-            let msg = if res.success {
-                format!(
-                    "Your viewing slot for property {} has been booked successfully for {}.",
-                    listing_id, slot_time
-                )
-            } else {
-                res.error
-                    .unwrap_or_else(|| "Viewing slot booking failed.".to_string())
-            };
-            serde_json::json!({ "success": res.success, "response_text": msg })
-        }
-        "search_properties"
-        | "search_listings"
-        | "rag_search"
-        | "search"
-        | "RagFetchAndAgentAnalysis" => {
-            let query = args
-                .get("query")
-                .or_else(|| args.get("search_query"))
-                .or_else(|| args.get("text"))
-                .or_else(|| args.get("input"))
-                .or_else(|| args.get("q"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let rag = rag::RAGPipeline::new(db_local.clone());
-            let knowledge_matches = match rag.search_knowledge(query).await { Ok(value) => value, Err(_) => return serde_json::json!({"success": false, "response_text": "Database unavailable"}) };
-            let results = match rag.search(query).await { Ok(value) => value, Err(_) => return serde_json::json!({"success": false, "response_text": "Database unavailable"}) };
-            let cfg =
-                config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
-
-            let lower_query = query.to_lowercase();
-            let msg = if lower_query.contains("restaurant")
-                || lower_query.contains("dining")
-                || lower_query.contains("food")
-                || lower_query.contains("culinary")
-            {
-                "While I specialize in luxury residential properties rather than dining reservations, I can recommend exquisite luxury apartments situated in world-class culinary hotspots and award-winning fine dining districts like Dubai Marina and Downtown Dubai.".to_string()
-            } else if rag::asks_listing_price(&query) {
-                if let Some(top) = results.first() {
-                    let price_type = if top.listing.listing_type == cfg.filter_primary_type_a {
-                        "purchase price"
-                    } else {
-                        "per year"
-                    };
-                    format!(
-                        "{} in {} is listed at {} {} ({}).",
-                        top.listing.title,
-                        top.listing.location,
-                        top.listing.price_aed,
-                        cfg.app_currency,
-                        price_type
-                    )
-                } else if !knowledge_matches.is_empty() {
-                    format_knowledge_matches(&knowledge_matches)
-                } else {
-                    cfg.domain_fallback_message.clone()
-                }
-            } else if !knowledge_matches.is_empty() {
-                format_knowledge_matches(&knowledge_matches)
-            } else if let Some(top) = results.first() {
-                let price_type = if top.listing.listing_type == cfg.filter_primary_type_a {
-                    "purchase price"
-                } else {
-                    "per year"
-                };
-                format!(
-                    "I found a matching option in {}: {}, priced at {} {} ({}) with {} rooms/units.",
-                    top.listing.location, top.listing.title, top.listing.price_aed, cfg.app_currency, price_type, top.listing.bedrooms
-                )
-            } else {
-                cfg.domain_fallback_message.clone()
-            };
-
-            let listings_val = serde_json::to_value(
-                results
-                    .iter()
-                    .map(|r| r.listing.clone())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or(serde_json::json!([]));
-
-            serde_json::json!({
-                "success": true,
-                "response_text": msg,
-                "total_found": results.len(),
-                "listings": listings_val,
-            })
-        }
-        _ => {
-            let msg = format!("Action completed for inquiry: {}", args);
-            serde_json::json!({ "success": true, "response_text": msg })
-        }
-    }
-}
-
-fn format_knowledge_matches(matches: &[rag::KnowledgeSearchResult]) -> String {
-    matches
-        .iter()
-        .take(3)
-        .map(|result| {
-            let content: String = result.document.content.chars().take(900).collect();
-            format!("{}: {}", result.document.title, content)
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
