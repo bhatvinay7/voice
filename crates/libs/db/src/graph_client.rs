@@ -9,17 +9,18 @@ pub async fn connect_graph_db(
     pass: &str,
     database: Option<&str>,
 ) -> Result<Arc<Graph>, String> {
-    let mut builder = ConfigBuilder::default()
-        .uri(uri)
-        .user(user)
-        .password(pass);
+    let mut builder = ConfigBuilder::default().uri(uri).user(user).password(pass);
 
     if let Some(db_name) = database {
         builder = builder.db(db_name);
     }
 
-    let config = builder.build().map_err(|e| format!("Graph config error: {}", e))?;
-    let graph = Graph::connect(config).await.map_err(|e| format!("Graph connection error: {}", e))?;
+    let config = builder
+        .build()
+        .map_err(|e| format!("Graph config error: {}", e))?;
+    let graph = Graph::connect(config)
+        .await
+        .map_err(|e| format!("Graph connection error: {}", e))?;
     Ok(Arc::new(graph))
 }
 
@@ -35,7 +36,10 @@ pub async fn push_workflow_dag_to_graph(
             .param("instruction", node.instruction.clone())
             .param("status", node.status.clone())
             .param("is_preset", node.is_preset);
-        graph.run(q).await.map_err(|e| format!("Failed to push node {}: {}", node.id, e))?;
+        graph
+            .run(q)
+            .await
+            .map_err(|e| format!("Failed to push node {}: {}", node.id, e))?;
     }
 
     // Connect nodes sequentially in DAG: (a)-[:PRECEDES]->(b)

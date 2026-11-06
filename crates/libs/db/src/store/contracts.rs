@@ -1,7 +1,7 @@
+use super::{postgres::error, DatabaseStore, DbResult};
 use crate::models::{OutboxNotification, TenancyContract};
 use chrono::Utc;
 use uuid::Uuid;
-use super::{DatabaseStore, DbResult, postgres::error};
 
 impl DatabaseStore {
     pub async fn upload_tenancy_contract(
@@ -55,12 +55,17 @@ impl DatabaseStore {
     pub async fn get_contract_review_queue(&self) -> DbResult<Vec<TenancyContract>> {
         self.fetch("SELECT row_to_json(t)::text FROM public.tenancy_contracts t WHERE needs_human_review AND status = 'pending_review' ORDER BY created_at", &[]).await
     }
-    pub async fn approve_contract_review(&self, contract_id: &str) -> DbResult<Option<TenancyContract>> {
+    pub async fn approve_contract_review(
+        &self,
+        contract_id: &str,
+    ) -> DbResult<Option<TenancyContract>> {
         Ok(self.fetch("UPDATE public.tenancy_contracts t SET status = 'approved', needs_human_review = false WHERE id = $1 AND status = 'pending_review' RETURNING row_to_json(t)::text", &[contract_id]).await?.pop())
     }
     pub async fn process_outbox_notifications(&self) -> DbResult<usize> {
         Ok(sqlx::query("UPDATE public.outbox_notifications SET status = 'sent', processed_at = $1 WHERE status = 'pending'")
             .bind(Utc::now().to_rfc3339()).execute(&self.pool).await.map_err(error)?.rows_affected() as usize)
     }
-    pub async fn get_outbox_notifications(&self) -> DbResult<Vec<OutboxNotification>> { self.all().await }
+    pub async fn get_outbox_notifications(&self) -> DbResult<Vec<OutboxNotification>> {
+        self.all().await
+    }
 }

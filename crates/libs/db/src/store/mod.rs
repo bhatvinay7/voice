@@ -1,13 +1,13 @@
-pub mod listings;
-pub mod users;
 pub mod bookings;
-pub mod contracts;
 pub mod calls;
+pub mod contracts;
+pub mod listings;
+mod postgres;
 #[cfg(test)]
 pub mod seed_data;
 #[cfg(test)]
 pub mod seed_knowledge;
-mod postgres;
+pub mod users;
 
 use crate::models::*;
 use config::AppConfig;
@@ -35,17 +35,29 @@ impl DatabaseStore {
         if cfg.postgres_url.trim().is_empty() {
             return Err("POSTGRES_URL or DATABASE_URL must be configured".into());
         }
-        let pool = PgPoolOptions::new().max_connections(10)
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
             .acquire_timeout(Duration::from_secs(15))
-            .connect_lazy(&cfg.postgres_url).map_err(|_| "Invalid PostgreSQL connection URL")?;
+            .connect_lazy(&cfg.postgres_url)
+            .map_err(|_| "Invalid PostgreSQL connection URL")?;
         let redis_client = Client::open(cfg.redis_url.clone()).ok();
-        Ok(Self { pool, redis_client, bucket_name: cfg.r2_bucket_name.clone() })
+        Ok(Self {
+            pool,
+            redis_client,
+            bucket_name: cfg.r2_bucket_name.clone(),
+        })
     }
 
     /// Fail startup when Neon is unavailable or schema migrations have not been applied.
     pub async fn initialize(&self) -> DbResult<()> {
-        sqlx::query("SELECT id FROM public.user_profiles LIMIT 0").execute(&self.pool).await.map_err(postgres::error)?;
-        sqlx::query("SELECT redis_entry_id FROM public.stream_events LIMIT 0").execute(&self.pool).await.map_err(postgres::error)?;
+        sqlx::query("SELECT id FROM public.user_profiles LIMIT 0")
+            .execute(&self.pool)
+            .await
+            .map_err(postgres::error)?;
+        sqlx::query("SELECT redis_entry_id FROM public.stream_events LIMIT 0")
+            .execute(&self.pool)
+            .await
+            .map_err(postgres::error)?;
         Ok(())
     }
 
@@ -57,8 +69,9 @@ impl DatabaseStore {
     }
 }
 
+mod legacy;
 #[cfg(test)]
 mod tests;
-mod legacy;
 
 mod conversation;
+pub use conversation::RedisSummaryCheckpoint;

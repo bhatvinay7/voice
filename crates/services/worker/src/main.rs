@@ -1,8 +1,21 @@
 mod conversation;
-use std::panic::AssertUnwindSafe;
-use tokio::sync::mpsc;
-use futures_util::FutureExt;
 use db::DatabaseStore;
+use futures_util::FutureExt;
+use std::panic::AssertUnwindSafe;
+use std::sync::OnceLock;
+use tokio::sync::mpsc;
+
+static SUMMARY_LLM_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn summary_llm_http_client() -> &'static reqwest::Client {
+    SUMMARY_LLM_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(16)
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 #[derive(Debug, Clone)]
 pub enum TransactionTask {
@@ -24,9 +37,32 @@ pub async fn run_summary_job_worker(
     mut summary_rx: mpsc::Receiver<(String, String)>,
     transaction_tx: mpsc::Sender<TransactionTask>,
 ) {
-    while let Some((session_id, transcript)) = summary_rx.recv().await {
-        if transaction_tx.send(TransactionTask::Summarize { session_id, transcript }).await.is_err() {
-            break;
+    loop {
+        // Retain the receiver outside the unwind boundary. A malformed job
+        // must not turn a recoverable panic into a closed worker channel.
+        let result = AssertUnwindSafe(async {
+            while let Some((session_id, transcript)) = summary_rx.recv().await {
+                if transaction_tx
+                    .send(TransactionTask::Summarize {
+                        session_id,
+                        transcript,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .catch_unwind()
+        .await;
+        match result {
+            Ok(true) => break,
+            Ok(false) => return,
+            Err(_) => {
+                eprintln!("[Summary Worker] Panic intercepted; receiver preserved and restarting.")
+            }
         }
     }
 }
@@ -39,8 +75,14 @@ pub async fn run_transaction_worker(
         let fut = AssertUnwindSafe(async {
             while let Some(task) = tx_rx.recv().await {
                 match task {
-                    TransactionTask::Summarize { session_id, transcript } => {
-                        println!("[Summary Worker] Summarizing conversation for call: {}", session_id);
+                    TransactionTask::Summarize {
+                        session_id,
+                        transcript,
+                    } => {
+                        println!(
+                            "[Summary Worker] Summarizing conversation for call: {}",
+                            session_id
+                        );
                         match generate_summary(&transcript).await {
                             Ok(generated_summary) => {
                                 if let Err(error) = db_update_tx
@@ -50,10 +92,16 @@ pub async fn run_transaction_worker(
                                     })
                                     .await
                                 {
-                                    eprintln!("[Summary Worker] Could not queue summary for {}: {}", session_id, error);
+                                    eprintln!(
+                                        "[Summary Worker] Could not queue summary for {}: {}",
+                                        session_id, error
+                                    );
                                 }
                             }
-                            Err(error) => eprintln!("[Summary Worker] Could not summarize call {}: {}", session_id, error),
+                            Err(error) => eprintln!(
+                                "[Summary Worker] Could not summarize call {}: {}",
+                                session_id, error
+                            ),
                         }
                     }
                 }
@@ -61,7 +109,9 @@ pub async fn run_transaction_worker(
         });
 
         if let Err(_) = fut.catch_unwind().await {
-            eprintln!("[Transaction Worker] Panic intercepted during LLM interaction! Restarting worker.");
+            eprintln!(
+                "[Transaction Worker] Panic intercepted during LLM interaction! Restarting worker."
+            );
         } else {
             break;
         }
@@ -75,7 +125,7 @@ async fn generate_summary(transcript: &str) -> Result<String, String> {
         return Err("LLM_API_KEY is empty".to_string());
     }
 
-    let response = reqwest::Client::new()
+    let response = summary_llm_http_client()
         .post(&cfg.llm_endpoint_url)
         .bearer_auth(&cfg.llm_api_key)
         .timeout(std::time::Duration::from_secs(45))
@@ -125,37 +175,92 @@ pub async fn run_db_update_worker(
                         session_id,
                         generated_summary,
                     } => {
-                        println!("[DB Update Worker] Persisting summary for session: {}", session_id);
+                        println!(
+                            "[DB Update Worker] Persisting summary for session: {}",
+                            session_id
+                        );
                         let events = match db.load_session_events(&session_id).await {
                             Ok(events) => events,
-                            Err(error) => { eprintln!("Could not load call context: {error}"); continue; }
+                            Err(error) => {
+                                eprintln!("Could not load call context: {error}");
+                                continue;
+                            }
                         };
-                        let user_id = events.iter().find(|event| event.event_type == "SESSION_STARTED")
-                            .and_then(|event| serde_json::from_str::<serde_json::Value>(&event.payload_json).ok())
-                            .and_then(|payload| payload.get("user_id").and_then(|v| v.as_str()).map(str::to_owned))
+                        let user_id = events
+                            .iter()
+                            .find(|event| event.event_type == "SESSION_STARTED")
+                            .and_then(|event| {
+                                serde_json::from_str::<serde_json::Value>(&event.payload_json).ok()
+                            })
+                            .and_then(|payload| {
+                                payload
+                                    .get("user_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned)
+                            })
                             .unwrap_or_default();
-                        let duration = events.first().zip(events.last()).and_then(|(first, last)| {
-                            let start = chrono::DateTime::parse_from_rfc3339(&first.timestamp).ok()?;
-                            let end = chrono::DateTime::parse_from_rfc3339(&last.timestamp).ok()?;
-                            Some((end - start).num_seconds().max(0).min(u32::MAX as i64) as u32)
-                        }).unwrap_or(0);
+                        let duration = events
+                            .first()
+                            .zip(events.last())
+                            .and_then(|(first, last)| {
+                                let start =
+                                    chrono::DateTime::parse_from_rfc3339(&first.timestamp).ok()?;
+                                let end =
+                                    chrono::DateTime::parse_from_rfc3339(&last.timestamp).ok()?;
+                                Some((end - start).num_seconds().max(0).min(u32::MAX as i64) as u32)
+                            })
+                            .unwrap_or(0);
                         let endpoints = match db.get_call_endpoints(&session_id).await {
                             Ok(record) => record,
-                            Err(error) => { eprintln!("Could not load recording details: {error}"); continue; }
+                            Err(error) => {
+                                eprintln!("Could not load recording details: {error}");
+                                continue;
+                            }
                         };
-                        if let Err(error) = db.save_call_summary(
-                            &session_id,
-                            &user_id,
-                            duration,
-                            endpoints.as_ref().map(|e| e.text_url.as_str()).unwrap_or(""),
-                            endpoints.as_ref().map(|e| e.audio_url.as_str()).unwrap_or(""),
-                            &generated_summary,
-                            0,
-                            "",
-                        ).await {
-                            eprintln!("[DB Update Worker] Could not persist summary for {}: {}", session_id, error);
+                        if let Err(error) = db
+                            .save_call_summary(
+                                &session_id,
+                                &user_id,
+                                duration,
+                                endpoints
+                                    .as_ref()
+                                    .map(|e| e.text_url.as_str())
+                                    .unwrap_or(""),
+                                endpoints
+                                    .as_ref()
+                                    .map(|e| e.audio_url.as_str())
+                                    .unwrap_or(""),
+                                &generated_summary,
+                                0,
+                                "",
+                            )
+                            .await
+                        {
+                            eprintln!(
+                                "[DB Update Worker] Could not persist summary for {}: {}",
+                                session_id, error
+                            );
                         } else {
-                            println!("[DB Update Worker] Summary successfully committed for session: {}", session_id);
+                            let checkpoint = db::RedisSummaryCheckpoint {
+                                summary: generated_summary.clone(),
+                                summary_version: events.len() as u64,
+                                covered_turn_id: events
+                                    .iter()
+                                    .filter(|event| event.event_type == "USER_PROMPT")
+                                    .count()
+                                    as u64,
+                                owner_epoch: 0,
+                            };
+                            if let Err(error) = db
+                                .save_redis_summary_checkpoint(&session_id, &checkpoint, 1800)
+                                .await
+                            {
+                                eprintln!("[DB Update Worker] Could not refresh Redis summary checkpoint for {}: {}", session_id, error);
+                            }
+                            println!(
+                                "[DB Update Worker] Summary successfully committed for session: {}",
+                                session_id
+                            );
                         }
                     }
                 }
@@ -175,24 +280,52 @@ async fn main() {
     dotenvy::dotenv().ok(); // Load .env if it exists
     println!("Starting separate Async Background Worker service...");
     let db = DatabaseStore::new();
-    db.initialize().await.expect("Neon database unavailable or migrations missing");
+    db.initialize()
+        .await
+        .expect("Neon database unavailable or migrations missing");
 
     let existing_summary_ids = db
         .load_call_summaries()
         .await
-        .map(|summaries| summaries.into_iter().map(|summary| summary.call_id).collect::<std::collections::HashSet<_>>())
+        .map(|summaries| {
+            summaries
+                .into_iter()
+                .map(|summary| summary.call_id)
+                .collect::<std::collections::HashSet<_>>()
+        })
         .unwrap_or_default();
     match db.load_call_endpoints().await {
         Ok(recordings) => {
             for recording in recordings {
                 if !existing_summary_ids.contains(&recording.session_id) {
-                    if let Err(error) = db.enqueue_call_summary(&recording.session_id, 0).await {
-                        eprintln!("[Worker Init] Could not enqueue existing call {} for summarization: {}", recording.session_id, error);
+                    // A historical endpoint alone does not prove that a
+                    // transcript exists. Queue only durable conversations;
+                    // otherwise startup recreates the same empty-Redis-stream
+                    // retry loop that normal session ordering avoids.
+                    match db.load_call_transcript(&recording.session_id).await {
+                        Ok(transcript) if !transcript.trim().is_empty() => {
+                            if let Err(error) =
+                                db.enqueue_call_summary(&recording.session_id, 0).await
+                            {
+                                eprintln!("[Worker Init] Could not enqueue existing call {} for summarization: {}", recording.session_id, error);
+                            }
+                        }
+                        Ok(_) => println!(
+                            "[Worker Init] Skipping summary backfill for {} without durable transcript",
+                            recording.session_id
+                        ),
+                        Err(error) => eprintln!(
+                            "[Worker Init] Could not check transcript for {}: {}",
+                            recording.session_id, error
+                        ),
                     }
                 }
             }
         }
-        Err(error) => eprintln!("[Worker Init] Could not load existing call recordings for summary backfill: {}", error),
+        Err(error) => eprintln!(
+            "[Worker Init] Could not load existing call recordings for summary backfill: {}",
+            error
+        ),
     }
 
     let (conversation_fetch_tx, conversation_fetch_rx) = mpsc::channel(100);
@@ -202,10 +335,10 @@ async fn main() {
 
     let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
     let redis_url = cfg.redis_url.clone();
-    
+
     let redis_url_poller = redis_url.clone();
     let summary_tx_poller = conversation_fetch_tx;
-    
+
     // Delay Queue Poller Loop
     tokio::spawn(async move {
         println!("[Worker Init] Starting ZSET Delay Queue Poller...");
@@ -214,12 +347,14 @@ async fn main() {
                 use redis::AsyncCommands;
                 loop {
                     let now = chrono::Utc::now().timestamp();
-                    let ready_jobs: redis::RedisResult<Vec<String>> = con.zrangebyscore("s3_sync_delay_queue", "-inf", now).await;
-                    
+                    let ready_jobs: redis::RedisResult<Vec<String>> =
+                        con.zrangebyscore("s3_sync_delay_queue", "-inf", now).await;
+
                     if let Ok(jobs) = ready_jobs {
                         for session_id in jobs {
                             // Atomically remove to ensure no double processing
-                            let removed: redis::RedisResult<i32> = con.zrem("s3_sync_delay_queue", &session_id).await;
+                            let removed: redis::RedisResult<i32> =
+                                con.zrem("s3_sync_delay_queue", &session_id).await;
                             if let Ok(count) = removed {
                                 if count > 0 {
                                     println!("[Worker Poller] Summary job ready for {}. Forwarding to summary worker.", session_id);
@@ -237,22 +372,15 @@ async fn main() {
     });
 
     let conversation_handle = tokio::spawn(conversation::run_conversation_fetch_worker(
-        conversation_fetch_rx, summary_worker_tx, db.clone(),
-    ));
-    let summary_handle = tokio::spawn(run_summary_job_worker(
-        summary_worker_rx,
-        transaction_tx,
-    ));
-
-    let tx_handle = tokio::spawn(run_transaction_worker(
-        transaction_rx,
-        db_update_tx,
-    ));
-
-    let db_handle = tokio::spawn(run_db_update_worker(
-        db_update_rx,
+        conversation_fetch_rx,
+        summary_worker_tx,
         db.clone(),
     ));
+    let summary_handle = tokio::spawn(run_summary_job_worker(summary_worker_rx, transaction_tx));
+
+    let tx_handle = tokio::spawn(run_transaction_worker(transaction_rx, db_update_tx));
+
+    let db_handle = tokio::spawn(run_db_update_worker(db_update_rx, db.clone()));
 
     let _ = tokio::join!(conversation_handle, summary_handle, tx_handle, db_handle);
 }

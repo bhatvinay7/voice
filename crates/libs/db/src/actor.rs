@@ -1,9 +1,9 @@
-use crate::{DatabaseStore, AdminGraphNode};
-use std::panic::AssertUnwindSafe;
+use crate::{AdminGraphNode, DatabaseStore};
 use futures_util::FutureExt;
-use tokio::sync::{mpsc, oneshot, Mutex};
-use std::sync::Arc;
 use neo4rs::Graph;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub type ProtectedDbReceiver = Arc<Mutex<mpsc::Receiver<DbRequest>>>;
 
@@ -55,7 +55,10 @@ impl DbActor {
 
     async fn check_idempotency(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         sqlx::query_scalar("SELECT response FROM public.actor_idempotency WHERE key = $1")
-            .bind(key).fetch_optional(&self.store.pool).await.map_err(|_| "Could not read retry state".into())
+            .bind(key)
+            .fetch_optional(&self.store.pool)
+            .await
+            .map_err(|_| "Could not read retry state".into())
     }
 
     async fn set_idempotency(&self, key: &str, value: &[u8]) -> Result<(), String> {
@@ -64,10 +67,7 @@ impl DbActor {
         Ok(())
     }
 
-    pub async fn run_loop(
-        protected_rx: ProtectedDbReceiver,
-        actor: DbActor,
-    ) {
+    pub async fn run_loop(protected_rx: ProtectedDbReceiver, actor: DbActor) {
         let db_actor = Arc::new(actor);
 
         loop {
@@ -89,13 +89,21 @@ impl DbActor {
 
     async fn handle_request(&self, req: DbRequest) {
         match req {
-            DbRequest::GetGraphNodes { idempotency_key, reply_to } => {
+            DbRequest::GetGraphNodes {
+                idempotency_key,
+                reply_to,
+            } => {
                 let cached = match self.check_idempotency(&idempotency_key).await {
                     Ok(cached) => cached,
-                    Err(error) => { let _ = reply_to.send(Err(error)); return; }
+                    Err(error) => {
+                        let _ = reply_to.send(Err(error));
+                        return;
+                    }
                 };
                 if let Some(cached) = cached {
-                    if let Ok(res) = serde_json::from_slice::<Result<Vec<AdminGraphNode>, String>>(&cached) {
+                    if let Ok(res) =
+                        serde_json::from_slice::<Result<Vec<AdminGraphNode>, String>>(&cached)
+                    {
                         let _ = reply_to.send(res);
                         return;
                     }
@@ -104,10 +112,17 @@ impl DbActor {
                 let res = self.store.get_graph_nodes().await;
                 let _ = reply_to.send(res);
             }
-            DbRequest::AddGraphNode { idempotency_key, node, reply_to } => {
+            DbRequest::AddGraphNode {
+                idempotency_key,
+                node,
+                reply_to,
+            } => {
                 let cached = match self.check_idempotency(&idempotency_key).await {
                     Ok(cached) => cached,
-                    Err(error) => { let _ = reply_to.send(Err(error)); return; }
+                    Err(error) => {
+                        let _ = reply_to.send(Err(error));
+                        return;
+                    }
                 };
                 if let Some(cached) = cached {
                     if let Ok(res) = serde_json::from_slice::<Result<(), String>>(&cached) {
@@ -119,15 +134,26 @@ impl DbActor {
                 let res = self.store.add_graph_node(node).await;
                 if let Ok(bytes) = serde_json::to_vec(&res) {
                     if res.is_ok() {
-                    let _ = self.set_idempotency(&idempotency_key, &bytes).await;
+                        let _ = self.set_idempotency(&idempotency_key, &bytes).await;
                     }
                 }
                 let _ = reply_to.send(res);
             }
-            DbRequest::PushRedisStream { idempotency_key, stream_name, session_id, trace_id, event_type, payload_json, reply_to } => {
+            DbRequest::PushRedisStream {
+                idempotency_key,
+                stream_name,
+                session_id,
+                trace_id,
+                event_type,
+                payload_json,
+                reply_to,
+            } => {
                 let cached = match self.check_idempotency(&idempotency_key).await {
                     Ok(cached) => cached,
-                    Err(error) => { let _ = reply_to.send(Err(error)); return; }
+                    Err(error) => {
+                        let _ = reply_to.send(Err(error));
+                        return;
+                    }
                 };
                 if let Some(cached) = cached {
                     if let Ok(res) = serde_json::from_slice::<Result<String, String>>(&cached) {
@@ -136,18 +162,36 @@ impl DbActor {
                     }
                 }
 
-                let res = self.store.push_redis_stream(&stream_name, &session_id, &trace_id, &event_type, &payload_json).await;
+                let res = self
+                    .store
+                    .push_redis_stream(
+                        &stream_name,
+                        &session_id,
+                        &trace_id,
+                        &event_type,
+                        &payload_json,
+                    )
+                    .await;
                 if let Ok(bytes) = serde_json::to_vec(&res) {
                     if res.is_ok() {
-                    let _ = self.set_idempotency(&idempotency_key, &bytes).await;
+                        let _ = self.set_idempotency(&idempotency_key, &bytes).await;
                     }
                 }
                 let _ = reply_to.send(res);
             }
-            DbRequest::SetJsonWithTtl { idempotency_key, key, payload_json, ttl_seconds, reply_to } => {
+            DbRequest::SetJsonWithTtl {
+                idempotency_key,
+                key,
+                payload_json,
+                ttl_seconds,
+                reply_to,
+            } => {
                 let cached = match self.check_idempotency(&idempotency_key).await {
                     Ok(cached) => cached,
-                    Err(error) => { let _ = reply_to.send(Err(error)); return; }
+                    Err(error) => {
+                        let _ = reply_to.send(Err(error));
+                        return;
+                    }
                 };
                 if let Some(cached) = cached {
                     if let Ok(res) = serde_json::from_slice::<Result<(), String>>(&cached) {
@@ -156,18 +200,30 @@ impl DbActor {
                     }
                 }
 
-                let res = self.store.set_json_with_ttl(&key, &payload_json, ttl_seconds).await;
+                let res = self
+                    .store
+                    .set_json_with_ttl(&key, &payload_json, ttl_seconds)
+                    .await;
                 if let Ok(bytes) = serde_json::to_vec(&res) {
                     if res.is_ok() {
-                    let _ = self.set_idempotency(&idempotency_key, &bytes).await;
+                        let _ = self.set_idempotency(&idempotency_key, &bytes).await;
                     }
                 }
                 let _ = reply_to.send(res);
             }
-            DbRequest::SaveS3Endpoints { idempotency_key, session_id, audio_url, text_url, reply_to } => {
+            DbRequest::SaveS3Endpoints {
+                idempotency_key,
+                session_id,
+                audio_url,
+                text_url,
+                reply_to,
+            } => {
                 let cached = match self.check_idempotency(&idempotency_key).await {
                     Ok(cached) => cached,
-                    Err(error) => { let _ = reply_to.send(Err(error)); return; }
+                    Err(error) => {
+                        let _ = reply_to.send(Err(error));
+                        return;
+                    }
                 };
                 if let Some(cached) = cached {
                     if let Ok(res) = serde_json::from_slice::<Result<(), String>>(&cached) {
@@ -176,10 +232,13 @@ impl DbActor {
                     }
                 }
 
-                let res = self.store.save_call_endpoints(&session_id, &audio_url, &text_url).await;
+                let res = self
+                    .store
+                    .save_call_endpoints(&session_id, &audio_url, &text_url)
+                    .await;
                 if let Ok(bytes) = serde_json::to_vec(&res) {
                     if res.is_ok() {
-                    let _ = self.set_idempotency(&idempotency_key, &bytes).await;
+                        let _ = self.set_idempotency(&idempotency_key, &bytes).await;
                     }
                 }
                 let _ = reply_to.send(res);

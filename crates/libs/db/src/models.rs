@@ -135,4 +135,3 @@ pub struct KnowledgeDocument {
     pub keywords: Vec<String>,
     pub metadata: serde_json::Value,
 }
-
