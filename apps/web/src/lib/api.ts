@@ -4,8 +4,10 @@ import { UserProfile } from "../../types/user";
 import { BookingResponse } from "../../types/booking";
 import { TenancyContract } from "../../types/contract";
 import { AdminGraphNode } from "../../types/graph";
-import { StreamEventRecord, CallSummaryRecord } from "../../types/log";
+import { StreamEventRecord, CallSummaryPage, CallSummaryQuery } from "../../types/log";
+import { keepPreviousData } from "@tanstack/react-query";
 import { AdminSessionDetailsResponse } from "../../types/admin";
+import type { SearchFilters } from "../../types/listing";
 
 const API_BASE = "/api";
 
@@ -31,6 +33,22 @@ export function useListings() {
   return useQuery({
     queryKey: ["listings"],
     queryFn: () => fetchJson<{ success: boolean; listings: PropertyListing[] }>("/listings"),
+  });
+}
+
+export function useManualListingSearch(filters: SearchFilters) {
+  return useQuery({
+    queryKey: ["listings", "manual", filters],
+    queryFn: () => fetchJson<{ success: boolean; listings: PropertyListing[] }>("/listings/search", {
+      method: "POST",
+      body: JSON.stringify({
+        query: filters.query || "",
+        location: filters.location || "",
+        max_price_aed: filters.max_price,
+        bedrooms: filters.bedrooms,
+        listing_type: filters.listing_type,
+      }),
+    }),
   });
 }
 
@@ -164,10 +182,13 @@ export function useAdminLogs() {
   });
 }
 
-export function useAdminCallSummaries() {
+export function useAdminCallSummaries({ page, pageSize, search }: CallSummaryQuery) {
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  if (search.trim()) params.set("q", search.trim());
   return useQuery({
-    queryKey: ["admin", "callSummaries"],
-    queryFn: () => fetchJson<{ success: boolean; summaries: CallSummaryRecord[] }>("/admin/call-summaries"),
+    queryKey: ["admin", "callSummaries", page, pageSize, search.trim()],
+    queryFn: () => fetchJson<CallSummaryPage>(`/admin/call-summaries?${params.toString()}`),
+    placeholderData: keepPreviousData,
   });
 }
 
