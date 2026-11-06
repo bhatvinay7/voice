@@ -1,9 +1,8 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 import Link from "next/link";
 import { Header } from "../components/Header";
-import { VoiceAgentOrbsDemo } from "../components/VoiceAgentOrbsDemo";
 import { useUserProfile } from "../lib/api";
 import { motion } from "framer-motion";
 import {
@@ -22,12 +21,11 @@ import {
 } from "lucide-react";
 
 export default function HomePage() {
-  const [agentModeActive, setAgentModeActive] = useState(true);
   const { data: userData } = useUserProfile();
   const user = userData?.user || null;
 
   return (
-    <div className="min-h-screen bg-theme-main text-theme-text font-sans antialiased selection:bg-indigo-200 selection:text-indigo-950 overflow-x-hidden transition-colors duration-300">
+    <div className="theme-page min-h-screen bg-theme-main text-theme-text font-sans antialiased selection:bg-indigo-200 selection:text-indigo-950 overflow-x-hidden transition-colors duration-300">
       {/* Soft Ambient Light Gradient Background */}
       <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
         <div className="absolute top-[-10%] left-[50%] -translate-x-1/2 w-[900px] h-[600px] rounded-full bg-gradient-to-tr from-indigo-500/10 via-cyan-500/10 to-transparent blur-[130px]" />
@@ -37,8 +35,6 @@ export default function HomePage() {
       <div className="relative z-10 flex flex-col min-h-screen">
         <Header
           user={user}
-          agentModeActive={agentModeActive}
-          onToggleAgentMode={setAgentModeActive}
         />
 
         <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 md:px-8 py-10 sm:py-16 md:py-24 w-full space-y-12 sm:space-y-16 md:space-y-24">
@@ -90,7 +86,7 @@ export default function HomePage() {
             >
               <Link
                 href="/dashboard"
-                className="w-full sm:w-auto group relative inline-flex items-center justify-center gap-3 px-8 py-3.5 sm:py-4 font-bold text-sm tracking-wide text-theme-text bg-theme-card hover:bg-black/10 dark:hover:bg-white/10 border border-theme-border dark:border-white/20 rounded-2xl shadow-lg transition-all hover:scale-105 active:scale-95"
+                className="w-full sm:w-auto group relative inline-flex items-center justify-center gap-3 px-8 py-3.5 sm:py-4 font-bold text-sm tracking-wide text-theme-text bg-theme-card hover:bg-black/10 light-blue-btn dark:hover:bg-white/10 border border-theme-border dark:border-white/20 rounded-2xl shadow-lg transition-all hover:scale-105 active:scale-95"
               >
                 <Mic className="w-5 h-5 text-cyan-400 group-hover:scale-110 transition-transform" />
                 <span>Start Voice Search</span>
@@ -99,7 +95,7 @@ export default function HomePage() {
 
               <Link
                 href="/auth"
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3.5 sm:py-4 font-bold text-sm tracking-wide text-theme-text bg-theme-card hover:bg-black/10 dark:hover:bg-white/10 border border-theme-border dark:border-white/15 rounded-2xl shadow-sm transition-all dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]"
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3.5 sm:py-4 font-bold text-sm tracking-wide text-theme-text bg-theme-card hover:bg-black/10 light-blue-btn dark:hover:bg-white/10 border border-theme-border dark:border-white/15 rounded-2xl shadow-sm transition-all dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]"
               >
                 <Building2 className="w-4 h-4 text-theme-accent" />
                 <span>Sign In / Register</span>
@@ -134,9 +130,6 @@ export default function HomePage() {
               <span className="flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" /> &lt;180ms Latency</span>
             </div>
           </section>
-
-          {/* INTERACTIVE VOICE AGENT ORBS DEMO */}
-          <VoiceAgentOrbsDemo />
 
           {/* HOW IT WORKS (Vaani AI & Observe.ai Card Design) */}
           <section className="space-y-8 sm:space-y-12">
@@ -229,7 +222,7 @@ export default function HomePage() {
             <div className="flex justify-center pt-2">
               <Link
                 href="/auth"
-                className="w-full sm:w-auto px-8 py-3.5 bg-theme-main hover:bg-black/10 dark:hover:bg-white/10 text-theme-text border border-theme-border dark:border-white/20 font-bold text-sm rounded-2xl shadow-md transition-all hover:scale-105 active:scale-95"
+                className="w-full sm:w-auto px-8 py-3.5 bg-theme-main hover:bg-black/10 text-theme-text light-blue-btn dark:hover:bg-white/10 border border-theme-border dark:border-white/20 font-bold text-sm rounded-2xl shadow-md transition-all hover:scale-105 active:scale-95"
               >
                 Get Started Free
               </Link>

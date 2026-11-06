@@ -14,14 +14,12 @@ import { CallTranscriptsView, TranscriptItem } from "./call/CallTranscriptsView"
 interface WebRtcCallWidgetProps {
   callId: string;
   userId: string;
-  agentModeActive?: boolean;
   onToggleCallState?: (active: boolean) => void;
 }
 
 export function WebRtcCallWidget({
   callId,
   userId,
-  agentModeActive = true,
   onToggleCallState,
 }: WebRtcCallWidgetProps): React.ReactElement {
   const [isCallActive, setIsCallActive] = useState<boolean>(false);
