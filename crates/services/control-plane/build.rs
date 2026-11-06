@@ -7,10 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "../../../proto/scheduler.proto",
                 "../../libs/orchestrator/proto/tools.proto",
             ],
-            &[
-                "../../../proto",
-                "../../libs/orchestrator/proto",
-            ],
+            &["../../../proto", "../../libs/orchestrator/proto"],
         )?;
     Ok(())
 }

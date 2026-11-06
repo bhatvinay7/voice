@@ -5,6 +5,23 @@ use tonic::{Request, Response, Status};
 pub struct ToolExecutionServiceImpl {
     pub db: db::DatabaseStore,
 }
+#[derive(Debug, Clone, Copy)]
+enum ToolName {
+    SearchProperties,
+    BookViewingSlot,
+}
+
+impl TryFrom<&str> for ToolName {
+    type Error = Status;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "search_properties" => Ok(Self::SearchProperties),
+            "book_viewing_slot" => Ok(Self::BookViewingSlot),
+            _ => Err(Status::invalid_argument("Unsupported tool name")),
+        }
+    }
+}
 
 #[tonic::async_trait]
 impl ToolExecutionService for ToolExecutionServiceImpl {
@@ -13,15 +30,12 @@ impl ToolExecutionService for ToolExecutionServiceImpl {
         request: Request<ToolRequest>,
     ) -> Result<Response<ToolResponse>, Status> {
         let req = request.into_inner();
-        let args: serde_json::Value =
-            serde_json::from_str(&req.args_json).unwrap_or(serde_json::json!({}));
+        let args: serde_json::Value = serde_json::from_str(&req.args_json)
+            .map_err(|_| Status::invalid_argument("Tool arguments must be valid JSON"))?;
+        let tool_name = ToolName::try_from(req.tool_name.as_str())?;
 
-        let output = match req.tool_name.as_str() {
-            "search_properties"
-            | "search_listings"
-            | "rag_search"
-            | "search"
-            | "RagFetchAndAgentAnalysis" => {
+        let output = match tool_name {
+            ToolName::SearchProperties => {
                 let query = args
                     .get("query")
                     .or_else(|| args.get("search_query"))
@@ -31,8 +45,12 @@ impl ToolExecutionService for ToolExecutionServiceImpl {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let rag = rag::RAGPipeline::new(self.db.clone());
-                let knowledge_matches = rag.search_knowledge(query).await.map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
-                let results = rag.search(query).await.map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
+                // These independent reads were sequential. With a slow remote
+                // database each could consume most of the caller's tool timeout,
+                // causing otherwise valid searches to retry forever.
+                let (knowledge_matches, results) =
+                    tokio::try_join!(rag.search_knowledge(query), rag.search(query),)
+                        .map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
                 let cfg =
                     config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
 
@@ -88,7 +106,7 @@ impl ToolExecutionService for ToolExecutionServiceImpl {
                     "listings": listings_val,
                 })
             }
-            "book_viewing_slot" => {
+            ToolName::BookViewingSlot => {
                 let listing_id = args
                     .get("listing_id")
                     .and_then(|v| v.as_str())
@@ -104,7 +122,9 @@ impl ToolExecutionService for ToolExecutionServiceImpl {
                 let idemp = format!("idemp-{}", req.task_id);
                 let res = self
                     .db
-                    .book_viewing_slot(listing_id, user_id, slot_time, &idemp).await.map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
+                    .book_viewing_slot(listing_id, user_id, slot_time, &idemp)
+                    .await
+                    .map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
                 let msg = if res.success {
                     format!(
                         "Your viewing slot for property {} has been booked successfully for {}.",
@@ -116,14 +136,13 @@ impl ToolExecutionService for ToolExecutionServiceImpl {
                 };
                 serde_json::json!({ "success": res.success, "response_text": msg })
             }
-            _ => {
-                let msg = format!("Action completed for inquiry: {}", args);
-                serde_json::json!({ "success": true, "response_text": msg })
-            }
         };
 
         Ok(Response::new(ToolResponse {
-            success: true,
+            success: output
+                .get("success")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
             result_json: output.to_string(),
             error_message: String::new(),
         }))

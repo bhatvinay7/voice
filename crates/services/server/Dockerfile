@@ -26,7 +26,14 @@ RUN cargo build --release --bin server
 
 # Stage 2: Runner
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+ARG DEEPFILTERNET_VERSION=0.5.6
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y ca-certificates curl libssl3 && \
+    asset="deep-filter-${DEEPFILTERNET_VERSION}-x86_64-unknown-linux-musl"; \
+    if [ "${TARGETARCH}" = "arm64" ]; then asset="deep-filter-${DEEPFILTERNET_VERSION}-aarch64-unknown-linux-gnu"; fi; \
+    curl --fail --location --retry 3 "https://github.com/Rikorose/DeepFilterNet/releases/download/v${DEEPFILTERNET_VERSION}/${asset}" -o /usr/local/bin/deep-filter && \
+    chmod 0755 /usr/local/bin/deep-filter && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r -g 999 voiceapp && useradd -r -u 999 -g voiceapp voiceapp
 RUN mkdir -p /app /data && chown -R voiceapp:voiceapp /app /data
