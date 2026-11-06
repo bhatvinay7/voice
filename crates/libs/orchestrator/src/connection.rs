@@ -2,7 +2,7 @@ use crate::{
     models::{QueueEvent, SessionEvent},
     slots::Slots,
 };
-use scheduler::grpc::{
+use control_plane::grpc::{
     cell_control_client::CellControlClient, cell_message, scheduler_message, AdmissionResult,
     CellMessage, Heartbeat, RegisterCell,
 };
@@ -16,26 +16,26 @@ use tokio_stream::wrappers::ReceiverStream;
 #[derive(Clone)]
 pub struct ConnectionManager {
     cell_id: String,
-    scheduler_endpoint: String,
+    control_plane_endpoint: String,
     orch_tx: mpsc::Sender<SessionEvent>,
     slots: Slots,
 }
 impl ConnectionManager {
     pub fn new(
         cell_id: String,
-        scheduler_endpoint: String,
+        control_plane_endpoint: String,
         orch_tx: mpsc::Sender<SessionEvent>,
         slots: Slots,
     ) -> Self {
         Self {
             cell_id,
-            scheduler_endpoint,
+            control_plane_endpoint,
             orch_tx,
             slots,
         }
     }
     pub async fn run(&self) {
-        let discovery = std::env::var("SCHEDULER_DISCOVERY_ADDR")
+        let discovery = std::env::var("CONTROL_PLANE_DISCOVERY_ADDR")
             .ok()
             .filter(|s| !s.is_empty());
         let mut connections: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
@@ -46,12 +46,12 @@ impl ConnectionManager {
                 match tokio::net::lookup_host(address).await {
                     Ok(addresses) => addresses.map(|ip| format!("http://{ip}")).collect(),
                     Err(error) => {
-                        tracing::warn!(%error, "scheduler DNS lookup failed; retaining current streams");
+                        tracing::warn!(%error, "control-plane DNS lookup failed; retaining current streams");
                         continue;
                     }
                 }
             } else {
-                [self.scheduler_endpoint.clone()].into_iter().collect()
+                [self.control_plane_endpoint.clone()].into_iter().collect()
             };
             connections.retain(|endpoint, task| {
                 if endpoints.contains(endpoint) && !task.is_finished() {
@@ -68,7 +68,7 @@ impl ConnectionManager {
                         loop {
                             if let Err(error) = manager.connect_and_process(endpoint.clone()).await
                             {
-                                tracing::warn!(%error, %endpoint, "scheduler stream disconnected");
+                                tracing::warn!(%error, %endpoint, "control-plane stream disconnected");
                             }
                             tokio::time::sleep(Duration::from_secs(3)).await;
                         }
@@ -136,7 +136,7 @@ impl ConnectionManager {
                     let Some(message) = message? else { return Ok(()); };
                     match message.msg {
                         Some(scheduler_message::Msg::StartSession(start)) => {
-                            let result = if scheduler::session_cell(&start.session_id).ok() != Some(self.cell_id.as_str()) {
+                            let result = if control_plane::session_cell(&start.session_id).ok() != Some(self.cell_id.as_str()) {
                                 Err("session belongs to another cell".into())
                             } else if start.session_id.starts_with("phone:") {
                                 Err("phone media must be attached locally".into())
@@ -153,10 +153,10 @@ impl ConnectionManager {
                             tx.send(self.heartbeat()).await?;
                         }
                         Some(scheduler_message::Msg::CancelSession(cancel)) => {
-                            if scheduler::session_cell(&cancel.session_id).ok() == Some(self.cell_id.as_str()) { self.orch_tx.send(QueueEvent::SessionCancelled { session_id: cancel.session_id }).await?; }
+                            if control_plane::session_cell(&cancel.session_id).ok() == Some(self.cell_id.as_str()) { self.orch_tx.send(QueueEvent::SessionCancelled { session_id: cancel.session_id }).await?; }
                         }
                         Some(scheduler_message::Msg::StopSession(stop)) => {
-                            if scheduler::session_cell(&stop.session_id).ok() == Some(self.cell_id.as_str()) { self.orch_tx.send(QueueEvent::SessionCancelled { session_id: stop.session_id }).await?; }
+                            if control_plane::session_cell(&stop.session_id).ok() == Some(self.cell_id.as_str()) { self.orch_tx.send(QueueEvent::SessionCancelled { session_id: stop.session_id }).await?; }
                         }
                         Some(scheduler_message::Msg::Drain(_)) => self.slots.drain(),
                         Some(scheduler_message::Msg::Ping(_)) => { tx.send(self.heartbeat()).await?; }
@@ -171,7 +171,7 @@ impl ConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scheduler::{
+    use control_plane::{
         grpc::{cell_control_server::CellControlServer, StartSession},
         CellControlService, SchedulerState,
     };
