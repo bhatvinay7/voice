@@ -1,7 +1,7 @@
+use crate::AppState;
 use axum::{extract::State, response::IntoResponse, Json};
 use serde::Deserialize;
 use serde_json::json;
-use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct ContractUploadReq {
@@ -59,7 +59,8 @@ pub async fn approve_contract(
     match db_try!(state.db.approve_contract_review(&payload.contract_id)) {
         Some(approved) => Json(json!({ "success": true, "contract": approved })).into_response(),
         None => {
-            Json(json!({ "success": false, "error": "Contract not found or already approved" })).into_response()
+            Json(json!({ "success": false, "error": "Contract not found or already approved" }))
+                .into_response()
         }
     }
 }
