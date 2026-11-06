@@ -11,8 +11,23 @@ use rag::RAGPipeline;
 use serde_json::json;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::time::DelayQueue;
+
+static SHARED_LLM_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// One connection-pooled HTTP client per agent process. `reqwest::Client` is
+/// cheap to clone and reuses keep-alive connections across all sessions.
+pub fn shared_llm_http_client() -> &'static reqwest::Client {
+    SHARED_LLM_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(32)
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 pub struct LlmAgentActor {
     pub run_id: RunId,
@@ -26,10 +41,29 @@ pub struct LlmAgentActor {
     pub active_listing_id: Option<String>,
     pub conversation_tx: Option<broadcast::Sender<orchestrator::ConversationEvent>>,
     pub last_redis_transcript: String,
+    pub active_graph_query_id: Option<String>,
+    pub active_playback_generation: u64,
 }
 
 struct RedisConversationResult {
     transcript: Result<Option<String>, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TurnPlan {
+    Clarify(String),
+    AnswerFromContext,
+    Tool {
+        message: Option<String>,
+        depends_on_query_ids: Vec<String>,
+        /// Resolved request from graph context. This lets a confirmation such
+        /// as "yes" execute the prior proposed search, never search "yes".
+        tool_query: Option<String>,
+    },
+    WaitForRelatedTool {
+        depends_on_query_id: String,
+        message: Option<String>,
+    },
 }
 
 /// One Redis polling connection per agent session. The actor never blocks on a
@@ -46,17 +80,36 @@ async fn run_agent_redis_poller(
         }
         let transcript = match AssertUnwindSafe(async {
             match connection.as_mut() {
-                Some(connection) => db.load_redis_conversation_on(&session_id, connection).await,
+                Some(connection) => {
+                    let live = db
+                        .load_redis_conversation_on(&session_id, connection)
+                        .await?;
+                    if live.is_some() {
+                        Ok(live)
+                    } else {
+                        Ok(db
+                            .load_redis_summary_checkpoint(&session_id)
+                            .await?
+                            .map(|checkpoint| checkpoint.summary))
+                    }
+                }
                 None => Err("Agent Redis polling connection unavailable".to_string()),
             }
-        }).catch_unwind().await {
+        })
+        .catch_unwind()
+        .await
+        {
             Ok(result) => result,
             Err(_) => Err("Agent Redis polling worker panicked".to_string()),
         };
         if transcript.is_err() {
             connection = None;
         }
-        if results.send(RedisConversationResult { transcript }).await.is_err() {
+        if results
+            .send(RedisConversationResult { transcript })
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -82,6 +135,8 @@ impl LlmAgentActor {
             active_listing_id: None,
             conversation_tx: None,
             last_redis_transcript: String::new(),
+            active_graph_query_id: None,
+            active_playback_generation: 0,
         }
     }
 
@@ -95,9 +150,19 @@ impl LlmAgentActor {
     }
 
     /// Evaluates whether the agent has enough context from cached data to answer the user question directly.
-    pub fn answer_from_cached_context(&self, user_prompt: &str) -> Option<String> {
+    pub fn answer_from_cached_context(
+        &self,
+        user_prompt: &str,
+        contextual_follow_up_phrases: &[String],
+        contextual_follow_up_clarification: &str,
+    ) -> Option<String> {
         let listing = self.get_active_listing()?;
-        AgentContextReasoner::answer_from_cached_context(listing, user_prompt)
+        AgentContextReasoner::answer_from_cached_context(
+            listing,
+            user_prompt,
+            contextual_follow_up_phrases,
+            contextual_follow_up_clarification,
+        )
     }
 
     /// Generic pluggable LLM completion supporting any OpenAI-compatible endpoint configured in .env
@@ -111,18 +176,27 @@ impl LlmAgentActor {
             return None;
         }
 
+        // Append a language constraint to the system prompt when configured.
+        let effective_system_prompt = if cfg.llm_response_language.is_empty() {
+            system_prompt.to_string()
+        } else {
+            format!(
+                "{} Always respond in {} regardless of the language the user speaks in.",
+                system_prompt, cfg.llm_response_language
+            )
+        };
+
         let payload = json!({
             "model": cfg.llm_model,
             "messages": [
-                { "role": "system", "content": system_prompt },
+                { "role": "system", "content": effective_system_prompt },
                 { "role": "user", "content": user_prompt }
             ],
             "temperature": 0.2,
             "max_tokens": 512
         });
 
-        let client = reqwest::Client::new();
-        let res = client
+        let res = shared_llm_http_client()
             .post(&cfg.llm_endpoint_url)
             .bearer_auth(&cfg.llm_api_key)
             .json(&payload)
@@ -176,18 +250,27 @@ impl LlmAgentActor {
             return None;
         }
 
+        // Append a language constraint when configured.
+        let effective_system_prompt = if cfg.llm_response_language.is_empty() {
+            system_prompt.to_string()
+        } else {
+            format!(
+                "{} Always respond in {} regardless of the language the user speaks in.",
+                system_prompt, cfg.llm_response_language
+            )
+        };
+
         let payload = json!({
             "model": model,
             "messages": [
-                { "role": "system", "content": system_prompt },
+                { "role": "system", "content": effective_system_prompt },
                 { "role": "user", "content": user_prompt }
             ],
             "temperature": 0.1,
             "max_tokens": 256
         });
 
-        let client = reqwest::Client::new();
-        let res = client
+        let res = shared_llm_http_client()
             .post(endpoint)
             .bearer_auth(api_key)
             .json(&payload)
@@ -218,10 +301,18 @@ impl LlmAgentActor {
         loop {
             tokio::select! {
                 Some(cmd) = rx.recv() => {
+                    let session_deleted = matches!(&cmd, AgentCmd::Cancel { run_id } if run_id == &actor.run_id);
                     let installs_fanout = matches!(cmd, AgentCmd::SetConversationFanout { .. });
                     let fut = AssertUnwindSafe(actor.handle_command(cmd));
                     if fut.catch_unwind().await.is_err() {
                         eprintln!("[LlmAgentActor {}] Command panicked; actor continues", actor.run_id.0);
+                    } else if session_deleted {
+                        // Cancellation is terminal for this session. Dropping the
+                        // request sender below closes the dedicated Redis poller;
+                        // clearing the fanout prevents any late publication.
+                        actor.conversation_tx = None;
+                        redis_refreshes.clear();
+                        break;
                     } else if installs_fanout {
                         redis_refreshes.insert((), std::time::Duration::from_secs(2));
                     }
@@ -242,33 +333,309 @@ impl LlmAgentActor {
         match result.transcript {
             Ok(Some(transcript)) if transcript != self.last_redis_transcript => {
                 self.last_redis_transcript = transcript.clone();
-                self.session_history.push(format!("[REDIS_CONVERSATION]: {transcript}"));
+                self.session_history
+                    .push(format!("[REDIS_CONVERSATION]: {transcript}"));
             }
             Ok(_) => {}
-            Err(error) => tracing::debug!(%error, run = %self.run_id.0, "Agent Redis refresh deferred"),
+            Err(error) => {
+                tracing::debug!(%error, run = %self.run_id.0, "Agent Redis refresh deferred")
+            }
         }
     }
 
-    async fn publish_assistant_conversation(&self, event_type: &str, payload_json: String) {
+    async fn request_graph_context(&self, query_id: &str, timeout_ms: u64) -> Option<String> {
+        let (reply_to, mut response_rx) = mpsc::channel(1);
+        self.orch_tx
+            .send(QueueEvent::GraphContextRequested {
+                session_id: self.run_id.call_id().to_string(),
+                query_id: query_id.to_string(),
+                reply_to,
+            })
+            .await
+            .ok()?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            response_rx.recv(),
+        )
+        .await
+        .ok()??;
+        response.context
+    }
+
+    /// Uses the fast model as a bounded turn gate. It receives only the
+    /// connected graph component for this question, not the whole session.
+    async fn plan_turn(&self, question: &str, graph_context: Option<&str>) -> TurnPlan {
+        let started_at = std::time::Instant::now();
+        let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
+        if cfg.agent_turn_planner_prompt_template.trim().is_empty() {
+            tracing::warn!(run = %self.run_id.0, "fast turn planner prompt is empty; using deterministic tool fallback");
+            return TurnPlan::Tool {
+                message: None,
+                depends_on_query_ids: Vec::new(),
+                tool_query: None,
+            };
+        }
+        let render = |template: &str| {
+            template
+                .replace("__SYSTEM_PROMPT__", &cfg.agent_system_prompt)
+                .replace("__USER_QUESTION__", question)
+                .replace("__GRAPH_CONTEXT__", graph_context.unwrap_or("{}"))
+        };
+        // Route with a tiny fast-model contract first, then use the narrow
+        // event prompt. If routing is unavailable, general planning remains
+        // deterministic and does not block a caller turn.
+        let mode = if cfg.agent_turn_router_prompt_template.trim().is_empty() {
+            "general".to_string()
+        } else {
+            self.call_pluggable_decision_llm(
+                &render(&cfg.agent_turn_router_prompt_template),
+                question,
+            )
+            .await
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.trim()).ok())
+            .and_then(|value| {
+                value
+                    .get("mode")
+                    .and_then(|mode| mode.as_str())
+                    .map(str::to_string)
+            })
+            .filter(|mode| {
+                matches!(
+                    mode.as_str(),
+                    "confirmation" | "reference" | "dependency" | "general"
+                )
+            })
+            .unwrap_or_else(|| "general".to_string())
+        };
+        let case_template = match mode.as_str() {
+            "confirmation"
+                if !cfg
+                    .agent_confirmation_planner_prompt_template
+                    .trim()
+                    .is_empty() =>
+            {
+                &cfg.agent_confirmation_planner_prompt_template
+            }
+            "reference"
+                if !cfg
+                    .agent_reference_planner_prompt_template
+                    .trim()
+                    .is_empty() =>
+            {
+                &cfg.agent_reference_planner_prompt_template
+            }
+            "dependency"
+                if !cfg
+                    .agent_dependency_planner_prompt_template
+                    .trim()
+                    .is_empty() =>
+            {
+                &cfg.agent_dependency_planner_prompt_template
+            }
+            _ => &cfg.agent_turn_planner_prompt_template,
+        };
+        let prompt = render(case_template);
+        let Some(raw_plan) = self.call_pluggable_decision_llm(&prompt, question).await else {
+            tracing::warn!(run = %self.run_id.0, elapsed_ms = started_at.elapsed().as_millis(), "fast turn planner unavailable; using deterministic tool fallback");
+            return TurnPlan::Tool {
+                message: None,
+                depends_on_query_ids: Vec::new(),
+                tool_query: None,
+            };
+        };
+        let json = raw_plan
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            tracing::warn!(run = %self.run_id.0, elapsed_ms = started_at.elapsed().as_millis(), "fast turn planner returned invalid JSON; using deterministic tool fallback");
+            return TurnPlan::Tool {
+                message: None,
+                depends_on_query_ids: Vec::new(),
+                tool_query: None,
+            };
+        };
+        let plan = match value.get("action").and_then(|action| action.as_str()) {
+            Some("clarify") => TurnPlan::Clarify(
+                value
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .filter(|message| !message.trim().is_empty())
+                    .unwrap_or("Could you please rephrase your property question?")
+                    .to_string(),
+            ),
+            Some("context") => TurnPlan::AnswerFromContext,
+            Some("tool") => TurnPlan::Tool {
+                message: value
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .filter(|message| !message.trim().is_empty())
+                    .map(str::to_string),
+                depends_on_query_ids: value
+                    .get("depends_on_query_ids")
+                    .and_then(|ids| ids.as_array())
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(|id| id.as_str())
+                            .filter(|id| !id.trim().is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                tool_query: value
+                    .get("tool_query")
+                    .and_then(|query| query.as_str())
+                    .filter(|query| !query.trim().is_empty())
+                    .map(str::to_string),
+            },
+            Some("wait") => value
+                .get("depends_on_query_id")
+                .and_then(|id| id.as_str())
+                .filter(|id| !id.trim().is_empty())
+                .map(|depends_on_query_id| TurnPlan::WaitForRelatedTool {
+                    depends_on_query_id: depends_on_query_id.to_string(),
+                    message: value
+                        .get("message")
+                        .and_then(|message| message.as_str())
+                        .map(str::to_string),
+                })
+                // Never wait without a concrete source permit. A malformed
+                // planner response falls back to a fresh tool decision.
+                .unwrap_or(TurnPlan::Tool {
+                    message: None,
+                    depends_on_query_ids: Vec::new(),
+                    tool_query: None,
+                }),
+            _ => TurnPlan::Tool {
+                message: None,
+                depends_on_query_ids: Vec::new(),
+                tool_query: None,
+            },
+        };
+        let action = match &plan {
+            TurnPlan::Clarify(_) => "clarify",
+            TurnPlan::AnswerFromContext => "context",
+            TurnPlan::Tool { .. } => "tool",
+            TurnPlan::WaitForRelatedTool { .. } => "wait",
+        };
+        tracing::info!(
+            run = %self.run_id.0,
+            action,
+            graph_context_present = graph_context.is_some(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "fast turn planner decision"
+        );
+        plan
+    }
+
+    /// Reconciliation is detached from caller-facing latency. This worker
+    /// receives only one connected query component and can only propose an
+    /// event; the owning SessionActor validates and applies it.
+    fn schedule_graph_enrichment(
+        &self,
+        query_id: Option<String>,
+        question: Option<String>,
+        graph_context: Option<String>,
+        response: String,
+    ) {
+        let Some(query_id) = query_id else {
+            return;
+        };
+        let Some(question) = question else {
+            return;
+        };
+        let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
+        if cfg.agent_graph_enrichment_prompt_template.trim().is_empty() {
+            return;
+        }
+        let base_graph_version = graph_context
+            .as_deref()
+            .and_then(|context| serde_json::from_str::<serde_json::Value>(context).ok())
+            .and_then(|json| json.get("graph_version").and_then(|value| value.as_u64()))
+            .unwrap_or(0);
+        let prompt = cfg
+            .agent_graph_enrichment_prompt_template
+            .replace("__SYSTEM_PROMPT__", &cfg.agent_system_prompt)
+            .replace("__USER_QUESTION__", &question)
+            .replace(
+                "__GRAPH_CONTEXT__",
+                graph_context.as_deref().unwrap_or("{}"),
+            )
+            .replace("__ASSISTANT_RESPONSE__", &response);
+        let worker = LlmAgentActor::new(
+            self.run_id.clone(),
+            self.db.clone(),
+            self.pubsub.clone(),
+            self.orch_tx.clone(),
+        );
+        let session_id = self.run_id.call_id().to_string();
+        let queue_tx = self.orch_tx.clone();
+        tokio::spawn(async move {
+            // A model outage must not affect the already-delivered answer.
+            // Use a bounded deterministic audit annotation as fallback.
+            let enrichment = worker
+                .call_pluggable_decision_llm(&prompt, &question)
+                .await
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| format!("Question answered: {question}; response: {response}"));
+            if queue_tx
+                .send(QueueEvent::GraphEnrichmentReady {
+                    session_id,
+                    query_id,
+                    base_graph_version,
+                    enrichment,
+                })
+                .await
+                .is_err()
+            {
+                tracing::debug!("graph enrichment discarded because session queue closed");
+            }
+        });
+    }
+
+    async fn publish_assistant_conversation(
+        &self,
+        event_type: &str,
+        payload_json: String,
+        relevance: orchestrator::ConversationRelevance,
+    ) {
         if let Some(tx) = &self.conversation_tx {
             let _ = tx.send(orchestrator::ConversationEvent {
                 session_id: self.run_id.call_id().to_string(),
                 trace_id: format!("trace-{}", chrono::Utc::now().timestamp_millis()),
                 event_type: event_type.to_string(),
                 payload_json,
+                relevance,
             });
         } else {
-            let _ = self.db.push_redis_stream(
-                "stream:conversation", self.run_id.call_id(),
-                &format!("trace-{}", chrono::Utc::now().timestamp_millis()), event_type, &payload_json,
-            ).await;
+            // Direct agents without a broadcast channel (tests / tool runners) write to Redis
+            // only when the exchange is relevant.
+            if relevance.is_relevant() {
+                let _ = self
+                    .db
+                    .push_redis_stream(
+                        "stream:conversation",
+                        self.run_id.call_id(),
+                        &format!("trace-{}", chrono::Utc::now().timestamp_millis()),
+                        event_type,
+                        &payload_json,
+                    )
+                    .await;
+            }
         }
     }
 
     pub async fn handle_command(&mut self, cmd: AgentCmd) {
         match cmd {
-            AgentCmd::SetConversationFanout { run_id, conversation_tx } => {
-                if run_id == self.run_id { self.conversation_tx = Some(conversation_tx); }
+            AgentCmd::SetConversationFanout {
+                run_id,
+                conversation_tx,
+            } => {
+                if run_id == self.run_id {
+                    self.conversation_tx = Some(conversation_tx);
+                }
             }
             AgentCmd::Start { run_id, input } => {
                 if run_id != self.run_id {
@@ -279,6 +646,17 @@ impl LlmAgentActor {
                     run_id.0, input
                 );
                 self.session_history.push(input);
+            }
+
+            AgentCmd::SetGraphQuery {
+                run_id,
+                query_id,
+                playback_generation,
+            } => {
+                if run_id == self.run_id {
+                    self.active_graph_query_id = Some(query_id);
+                    self.active_playback_generation = playback_generation;
+                }
             }
 
             AgentCmd::SetAiListenMute { muted, run_id } => {
@@ -312,7 +690,12 @@ impl LlmAgentActor {
             }
 
             AgentCmd::UserInput {
-                run_id, user_id, text, role
+                run_id,
+                user_id,
+                text,
+                clean_text,
+                noise,
+                role,
             } => {
                 if run_id != self.run_id {
                     return;
@@ -321,38 +704,219 @@ impl LlmAgentActor {
                     println!("[LlmAgentActor] Muted! Ignoring input from role {:?}", role);
                     return;
                 }
+                tracing::info!(run = %run_id.0, chars = text.len(), "agent received final user input");
 
                 let trace_id = format!("trace-{}", chrono::Utc::now().timestamp_millis());
 
                 // Session actors already broadcast user input to S3 and Redis. Directly
                 // constructed agents (tests or tools) retain durable persistence here.
                 if self.conversation_tx.is_none() {
-                    let _ = self.db.push_redis_stream(
-                        "stream:conversation", run_id.call_id(), &trace_id, "USER_PROMPT",
-                        &json!({ "text": text, "role": role }).to_string(),
-                    ).await;
+                    let _ = self
+                        .db
+                        .push_redis_stream(
+                            "stream:conversation",
+                            run_id.call_id(),
+                            &trace_id,
+                            "USER_PROMPT",
+                            &json!({ "text": text, "role": role }).to_string(),
+                        )
+                        .await;
                 }
 
+                // Push the raw transcript to history for context continuity;
+                // use the clean_text for all LLM / RAG calls below.
                 self.session_history.push(text.clone());
+
+                // If noise was heavy/moderate and nothing intelligible came through,
+                // respond with the unclear-audio message rather than querying the LLM.
+                if let Some(ref np) = noise {
+                    if np.level == orchestrator::audio_gate::NoiseLevel::Heavy
+                        && np.speech_ratio < 0.15
+                    {
+                        let cfg = config::AppConfig::load()
+                            .unwrap_or_else(|_| config::AppConfig::load_default());
+                        let unclear_msg = cfg.unclear_audio_message.clone();
+                        tracing::warn!(
+                            "[LlmAgentActor] Heavy noise utterance — asking user to repeat"
+                        );
+                        let _ = self
+                            .orch_tx
+                            .send(QueueEvent::Agent(AgentEvent::Finished {
+                                run_id: run_id.clone(),
+                                query_id: self.active_graph_query_id.clone(),
+                                playback_generation: self.active_playback_generation,
+                                result: unclear_msg.clone(),
+                                relevance: orchestrator::ConversationRelevance::Irrelevant,
+                            }))
+                            .await;
+                        let _ = self.pubsub.publish(pubsub::SystemEvent::VoiceTtsStream {
+                            call_id: run_id.call_id().to_string(),
+                            audio_chunk_base64: format!("audio_chunk_{}", unclear_msg.len()),
+                            index: 0,
+                            is_end: true,
+                        });
+                        return;
+                    }
+                }
 
                 let cfg =
                     config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
-                let lower = text.to_lowercase();
+                // Use the cleaned text for booking detection and RAG.
+                let effective_text = if clean_text.is_empty() {
+                    &text
+                } else {
+                    &clean_text
+                };
+                let graph_context = if let Some(query_id) = self.active_graph_query_id.as_deref() {
+                    self.request_graph_context(query_id, cfg.graph_context_request_timeout_ms)
+                        .await
+                } else {
+                    None
+                };
+                let turn_plan = self
+                    .plan_turn(effective_text, graph_context.as_deref())
+                    .await;
+                let planner_requires_tool = matches!(&turn_plan, TurnPlan::Tool { .. });
+                let planner_wait_message = match &turn_plan {
+                    TurnPlan::Tool { message, .. } => message.clone(),
+                    _ => None,
+                };
+                let planner_dependencies = match &turn_plan {
+                    TurnPlan::Tool {
+                        depends_on_query_ids,
+                        ..
+                    } => depends_on_query_ids.clone(),
+                    _ => Vec::new(),
+                };
+                let planner_tool_query = match &turn_plan {
+                    TurnPlan::Tool { tool_query, .. } => tool_query.clone(),
+                    _ => None,
+                };
+                match turn_plan {
+                    TurnPlan::Clarify(question) => {
+                        tracing::info!(run = %run_id.0, "fast turn planner requested clarification before tool execution");
+                        let _ = self
+                            .orch_tx
+                            .send(QueueEvent::Agent(AgentEvent::NeedsUserInput {
+                                run_id,
+                                question,
+                            }))
+                            .await;
+                        return;
+                    }
+                    TurnPlan::WaitForRelatedTool {
+                        depends_on_query_id,
+                        message,
+                    } => {
+                        let Some(query_id) = self.active_graph_query_id.clone() else {
+                            // A wait without immutable query identity cannot
+                            // receive a safe answer permit.
+                            return;
+                        };
+                        let _ = self
+                            .orch_tx
+                            .send(QueueEvent::Agent(AgentEvent::WaitForRelatedTool {
+                                run_id,
+                                query_id,
+                                depends_on_query_id,
+                                wait_message: message,
+                            }))
+                            .await;
+                        return;
+                    }
+                    TurnPlan::AnswerFromContext => {
+                        // The fast model found enough connected context. The
+                        // response still belongs to the main agent model: the
+                        // fast model is a planner, never caller-facing.
+                        if let Some(context) = graph_context.as_deref() {
+                            let prompt = cfg
+                                .agent_context_prompt_template
+                                .replace("__SYSTEM_PROMPT__", &cfg.agent_system_prompt)
+                                .replace("__CONTEXT__", context)
+                                .replace("__DOMAIN__", "UAE real estate")
+                                .replace("__CURRENCY__", "AED")
+                                .replace(
+                                    "__UNRELATED_QUERY_MESSAGE__",
+                                    &cfg.unrelated_query_message,
+                                );
+                            if let Some(answer) = self
+                                .call_pluggable_llm(&prompt, effective_text)
+                                .await
+                                .filter(|answer| !answer.trim().is_empty())
+                            {
+                                self.publish_assistant_conversation(
+                                    "LLM_RESPONSE",
+                                    serde_json::json!({
+                                        "response_text": answer,
+                                        "source": "graph_context_agent_model"
+                                    })
+                                    .to_string(),
+                                    orchestrator::ConversationRelevance::Relevant,
+                                )
+                                .await;
+                                self.schedule_graph_enrichment(
+                                    self.active_graph_query_id.clone(),
+                                    Some(effective_text.to_string()),
+                                    graph_context.clone(),
+                                    answer.clone(),
+                                );
+                                let _ = self
+                                    .orch_tx
+                                    .send(QueueEvent::Agent(AgentEvent::Finished {
+                                        run_id: run_id.clone(),
+                                        query_id: self.active_graph_query_id.clone(),
+                                        playback_generation: self.active_playback_generation,
+                                        result: answer,
+                                        relevance: orchestrator::ConversationRelevance::Relevant,
+                                    }))
+                                    .await;
+                                return;
+                            }
+                        }
+                        // A malformed/empty fast answer must not turn into a
+                        // blind tool call; ask the caller to make the subject
+                        // explicit instead.
+                        let _ = self
+                            .orch_tx
+                            .send(QueueEvent::Agent(AgentEvent::NeedsUserInput {
+                                run_id,
+                                question: "Could you please rephrase the property detail you need?"
+                                    .to_string(),
+                            }))
+                            .await;
+                        return;
+                    }
+                    TurnPlan::Tool { .. } => {}
+                }
+                let lower = effective_text.to_lowercase();
                 let is_booking = cfg
                     .action_booking_keywords
                     .iter()
                     .any(|k| lower.contains(&k.to_lowercase()));
 
                 // Evaluate whether we already have sufficient context from previous searches to answer directly
-                if !is_booking {
-                    if let Some(cached_response) = self.answer_from_cached_context(&text) {
+                // A fast-model `tool` decision is authoritative. It avoids a
+                // second, heuristic response path that could bypass the agent
+                // model or use stale cached listing data.
+                if !is_booking && !planner_requires_tool {
+                    if let Some(cached_response) = self.answer_from_cached_context(
+                        effective_text,
+                        &cfg.contextual_follow_up_phrases,
+                        &cfg.contextual_follow_up_clarification,
+                    ) {
                         println!("[LlmAgentActor] Answering follow-up question directly from cached property context for run {}", run_id.0);
 
-                        self.publish_assistant_conversation("LLM_RESPONSE", json!({
-                            "response_text": cached_response, "source": "session_cache"
-                        }).to_string()).await;
+                        self.publish_assistant_conversation(
+                            "LLM_RESPONSE",
+                            serde_json::json!({
+                                "response_text": cached_response, "source": "session_cache"
+                            })
+                            .to_string(),
+                            orchestrator::ConversationRelevance::Relevant,
+                        )
+                        .await;
 
-                        let _ = self.pubsub.publish(SystemEvent::VoiceTtsStream {
+                        let _ = self.pubsub.publish(pubsub::SystemEvent::VoiceTtsStream {
                             call_id: run_id.call_id().to_string(),
                             audio_chunk_base64: format!("audio_chunk_{}", cached_response.len()),
                             index: 0,
@@ -363,7 +927,10 @@ impl LlmAgentActor {
                             .orch_tx
                             .send(QueueEvent::Agent(AgentEvent::Finished {
                                 run_id: run_id.clone(),
+                                query_id: self.active_graph_query_id.clone(),
+                                playback_generation: self.active_playback_generation,
                                 result: cached_response,
+                                relevance: orchestrator::ConversationRelevance::Relevant,
                             }))
                             .await;
                         return;
@@ -373,12 +940,29 @@ impl LlmAgentActor {
                     // and user is asking an edge question about it (not asking for a different location or explicit new search)
                     if let Some(listing) = self.get_active_listing() {
                         if !AgentContextReasoner::is_different_location_or_new_search(
-                            &text, listing,
+                            effective_text,
+                            listing,
                         ) {
-                            let context_desc = format!(
+                            let mut context_desc = format!(
                                 "Active Property: {} in {} (ID: {}). Type: {}. Price: AED {}. Bedrooms: {}. Bathrooms: {}. Area: {} sqft. Pet Friendly: {}. Near Metro: {}. Description: {}. Available Slots: {:?}.",
                                 listing.title, listing.location, listing.id, listing.listing_type, listing.price_aed, listing.bedrooms, listing.bathrooms, listing.area_sqft, listing.pet_friendly, listing.near_metro, listing.description, listing.available_slots
                             );
+                            // Cached field matching did not answer this turn, so
+                            // this is the narrow point where the decision LLM may
+                            // need relationship context. Fetch only the current
+                            // query's connected component, on demand.
+                            if let Some(query_id) = self.active_graph_query_id.as_deref() {
+                                if let Some(graph_context) = self
+                                    .request_graph_context(
+                                        query_id,
+                                        cfg.graph_context_request_timeout_ms,
+                                    )
+                                    .await
+                                {
+                                    context_desc.push_str("\nRelated conversation graph: ");
+                                    context_desc.push_str(&graph_context);
+                                }
+                            }
                             let edge_prompt = cfg
                                 .agent_edge_prompt_template
                                 .replace("__SYSTEM_PROMPT__", &cfg.agent_system_prompt)
@@ -388,17 +972,22 @@ impl LlmAgentActor {
                                     &cfg.unrelated_query_message,
                                 );
 
-                            let llm_reply =
-                                self.call_pluggable_decision_llm(&edge_prompt, &text).await;
+                            let llm_reply = self
+                                .call_pluggable_decision_llm(&edge_prompt, effective_text)
+                                .await;
 
                             if let Some(edge_response) = llm_reply {
                                 println!("[LlmAgentActor] Fast pluggable model answered edge question from active property context for run {}", run_id.0);
 
-                                self.publish_assistant_conversation("LLM_RESPONSE", json!({
-                                    "response_text": edge_response, "source": "llm_cached_context"
-                                }).to_string()).await;
+                                self.publish_assistant_conversation(
+                                    "LLM_RESPONSE",
+                                    serde_json::json!({
+                                        "response_text": edge_response, "source": "llm_cached_context"
+                                    }).to_string(),
+                                    orchestrator::ConversationRelevance::Relevant,
+                                ).await;
 
-                                let _ = self.pubsub.publish(SystemEvent::VoiceTtsStream {
+                                let _ = self.pubsub.publish(pubsub::SystemEvent::VoiceTtsStream {
                                     call_id: run_id.call_id().to_string(),
                                     audio_chunk_base64: format!(
                                         "audio_chunk_{}",
@@ -412,7 +1001,10 @@ impl LlmAgentActor {
                                     .orch_tx
                                     .send(QueueEvent::Agent(AgentEvent::Finished {
                                         run_id: run_id.clone(),
+                                        query_id: self.active_graph_query_id.clone(),
+                                        playback_generation: self.active_playback_generation,
                                         result: edge_response,
+                                        relevance: orchestrator::ConversationRelevance::Relevant,
                                     }))
                                     .await;
                                 return;
@@ -439,36 +1031,58 @@ impl LlmAgentActor {
                         .or_else(|| self.get_active_listing().map(|l| l.id.as_str()))
                         .unwrap_or_default();
 
-                    let _ = self
+                    if let Err(error) = self
                         .orch_tx
                         .send(QueueEvent::Agent(AgentEvent::ToolRequested {
                             run_id: run_id.clone(),
                             task_id,
+                        query_id: self.active_graph_query_id.clone(),
+                        playback_generation: self.active_playback_generation,
+                        depends_on_query_ids: planner_dependencies.clone(),
                             tool_name: "book_viewing_slot".to_string(),
+                            wait_message: planner_wait_message.clone(),
                             args: json!({
                                 "listing_id": listing_id,
                                 "user_id": user_id,
                                 "slot_time": self.get_active_listing().and_then(|l| l.available_slots.first()).map(String::as_str).unwrap_or_default()
                             }),
                         }))
-                        .await;
+                        .await
+                    {
+                        tracing::error!(run = %run_id.0, %error, "booking tool request could not be dispatched");
+                    } else {
+                        tracing::info!(run = %run_id.0, tool = "book_viewing_slot", "agent dispatched tool request");
+                    }
                 } else {
-                    let _ = self
+                    if let Err(error) = self
                         .orch_tx
                         .send(QueueEvent::Agent(AgentEvent::ToolRequested {
                             run_id: run_id.clone(),
                             task_id,
+                            query_id: self.active_graph_query_id.clone(),
+                            playback_generation: self.active_playback_generation,
+                            depends_on_query_ids: planner_dependencies,
                             tool_name: "search_properties".to_string(),
-                            args: json!({ "query": text }),
+                            wait_message: planner_wait_message,
+                            // Send the clean query to the RAG pipeline.
+                            args: json!({ "query": planner_tool_query.as_deref().unwrap_or(effective_text) }),
                         }))
-                        .await;
+                        .await
+                    {
+                        tracing::error!(run = %run_id.0, %error, "property-search tool request could not be dispatched");
+                    } else {
+                        tracing::info!(run = %run_id.0, tool = "search_properties", "agent dispatched tool request");
+                    }
                 }
             }
 
             AgentCmd::ToolResult {
                 run_id,
                 task_id,
+                query_id,
                 outcome,
+                user_question,
+                graph_context,
             } => {
                 if run_id != self.run_id {
                     return;
@@ -493,15 +1107,61 @@ impl LlmAgentActor {
                             }
                         }
 
-                        let speech_text = result_value
+                        let base_speech_text = result_value
                             .get("response_text")
                             .and_then(|v| v.as_str())
                             .unwrap_or("Action completed successfully.")
                             .to_string();
 
-                        self.publish_assistant_conversation("LLM_RESPONSE", json!({
-                            "response_text": speech_text, "task_id": task_id.0,
-                        }).to_string()).await;
+                        // A raw RAG result is context, not caller-facing
+                        // speech. Generate an answer for the specific source
+                        // question after the session actor has attached the
+                        // result to that question's graph branch.
+                        let speech_text = if let (Some(question), Some(context)) =
+                            (user_question.as_deref(), graph_context.as_deref())
+                        {
+                            let cfg = config::AppConfig::load()
+                                .unwrap_or_else(|_| config::AppConfig::load_default());
+                            if cfg.agent_tool_result_prompt_template.trim().is_empty() {
+                                base_speech_text
+                            } else {
+                                let prompt = cfg
+                                    .agent_tool_result_prompt_template
+                                    .replace("__SYSTEM_PROMPT__", &cfg.agent_system_prompt)
+                                    .replace("__USER_QUESTION__", question)
+                                    .replace("__TOOL_RESULT__", &result_value.to_string())
+                                    .replace("__GRAPH_CONTEXT__", context);
+                                self.call_pluggable_llm(&prompt, question)
+                                    .await
+                                    .filter(|answer| !answer.trim().is_empty())
+                                    .unwrap_or(base_speech_text)
+                            }
+                        } else {
+                            base_speech_text
+                        };
+
+                        // executor.rs injects "domain_relevant": false when only the
+                        // domain_fallback_message was returned (no property results).
+                        let is_relevant = result_value
+                            .get("domain_relevant")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        let relevance = if is_relevant {
+                            orchestrator::ConversationRelevance::Relevant
+                        } else {
+                            orchestrator::ConversationRelevance::Irrelevant
+                        };
+
+                        self.publish_assistant_conversation(
+                            "LLM_RESPONSE",
+                            serde_json::json!({
+                                "response_text": speech_text, "task_id": task_id.0,
+                                "domain_relevant": is_relevant,
+                            })
+                            .to_string(),
+                            relevance,
+                        )
+                        .await;
 
                         let _ = self.pubsub.publish(SystemEvent::VoiceTtsStream {
                             call_id: run_id.call_id().to_string(),
@@ -510,11 +1170,21 @@ impl LlmAgentActor {
                             is_end: true,
                         });
 
+                        self.schedule_graph_enrichment(
+                            query_id.clone(),
+                            user_question.clone(),
+                            graph_context.clone(),
+                            speech_text.clone(),
+                        );
+
                         let _ = self
                             .orch_tx
                             .send(QueueEvent::Agent(AgentEvent::Finished {
                                 run_id: run_id.clone(),
+                                query_id: query_id.clone(),
+                                playback_generation: self.active_playback_generation,
                                 result: speech_text,
+                                relevance,
                             }))
                             .await;
                     }
@@ -527,6 +1197,12 @@ impl LlmAgentActor {
                             }))
                             .await;
                     }
+                }
+            }
+
+            AgentCmd::CancelGeneration { run_id } => {
+                if run_id == self.run_id {
+                    tracing::debug!(run = %run_id.0, "generation cancellation acknowledged; no graph model task is active");
                 }
             }
 
@@ -552,10 +1228,18 @@ impl LlmAgentActor {
                 if run_id != self.run_id {
                     return;
                 }
-                println!(
-                    "[LlmAgentActor] Run {}: Task {} is retrying (Attempt {})",
-                    run_id.0, task_id.0, attempt
-                );
+                tracing::info!(run = %run_id.0, task = %task_id.0, attempt, "tool retrying");
+                let cfg =
+                    config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
+                if !cfg.tool_retry_tts_prompt.trim().is_empty() {
+                    let _ = self
+                        .orch_tx
+                        .send(QueueEvent::Agent(AgentEvent::NeedsUserInput {
+                            run_id,
+                            question: cfg.tool_retry_tts_prompt,
+                        }))
+                        .await;
+                }
             }
 
             AgentCmd::Cancel { run_id } => {
@@ -563,6 +1247,136 @@ impl LlmAgentActor {
                     return;
                 }
                 println!("[LlmAgentActor] Cancelled run {}", run_id.0);
+                // Make deletion terminal even if the actor receives a command
+                // raced with teardown. The loop observes this command and exits.
+                self.conversation_tx = None;
+                self.session_history.clear();
+                self.cached_listings.clear();
+                self.active_listing_id = None;
+            }
+
+            AgentCmd::ContinueLast { run_id, kind } => {
+                use orchestrator::speech_filter::ContinuationKind;
+                if run_id != self.run_id {
+                    return;
+                }
+                if self.is_muted {
+                    return;
+                }
+
+                let cfg =
+                    config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
+
+                // Derive a topic label from the active listing, falling back to the last history entry.
+                let topic = if let Some(listing) = self.get_active_listing() {
+                    format!("{} in {}", listing.title, listing.location)
+                } else {
+                    self.session_history
+                        .iter()
+                        .rev()
+                        .find(|h| !h.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| "our previous topic".to_string())
+                };
+
+                // Find the last AI response in history (every other entry is AI).
+                let last_ai_response: Option<String> = {
+                    // session_history contains interleaved user + AI turns.
+                    // Scan backwards for the last non-user-looking entry.
+                    self.session_history
+                        .iter()
+                        .rev()
+                        .skip(1) // skip the very last (which is the user's "repeat")
+                        .find(|h| !h.starts_with('[') && h.len() > 20)
+                        .cloned()
+                };
+
+                match kind {
+                    ContinuationKind::Repeat => {
+                        // Ask the LLM to rephrase the last answer concisely.
+                        let system_prompt = cfg.agent_system_prompt.clone();
+                        let user_prompt = format!(
+                            "We are talking about: {}. The user asked you to repeat your last answer. \
+                             Rephrase it concisely in 2-3 sentences, keeping all facts accurate. \
+                             Previous answer: {}",
+                            topic,
+                            last_ai_response.as_deref().unwrap_or("(no previous answer available)")
+                        );
+
+                        tracing::info!(
+                            "[LlmAgentActor] Handling Repeat continuation for run {}",
+                            run_id.0
+                        );
+                        if let Some(reply) =
+                            self.call_pluggable_llm(&system_prompt, &user_prompt).await
+                        {
+                            let prefixed = format!("We are talking about {}. {}", topic, reply);
+                            self.publish_assistant_conversation(
+                                "LLM_RESPONSE",
+                                serde_json::json!({ "response_text": prefixed, "source": "continuation_repeat" }).to_string(),
+                                orchestrator::ConversationRelevance::Relevant,
+                            ).await;
+                            let _ = self.pubsub.publish(pubsub::SystemEvent::VoiceTtsStream {
+                                call_id: run_id.call_id().to_string(),
+                                audio_chunk_base64: format!("audio_chunk_{}", prefixed.len()),
+                                index: 0,
+                                is_end: true,
+                            });
+                            let _ = self
+                                .orch_tx
+                                .send(QueueEvent::Agent(AgentEvent::Finished {
+                                    run_id: run_id.clone(),
+                                    query_id: self.active_graph_query_id.clone(),
+                                    playback_generation: self.active_playback_generation,
+                                    result: prefixed,
+                                    relevance: orchestrator::ConversationRelevance::Relevant,
+                                }))
+                                .await;
+                        }
+                    }
+                    ContinuationKind::Continue => {
+                        // Continue from cached context without a new RAG search.
+                        let system_prompt = cfg.agent_system_prompt.clone();
+                        let user_prompt = format!(
+                            "We are talking about: {}. The user wants you to continue from where you left off. \
+                             Continue your explanation or description naturally, adding more relevant detail. \
+                             Previous context: {}",
+                            topic,
+                            last_ai_response.as_deref().unwrap_or("(no previous context available)")
+                        );
+
+                        tracing::info!(
+                            "[LlmAgentActor] Handling Continue continuation for run {}",
+                            run_id.0
+                        );
+                        if let Some(reply) =
+                            self.call_pluggable_llm(&system_prompt, &user_prompt).await
+                        {
+                            let prefixed = format!("We are talking about {}. {}", topic, reply);
+                            self.publish_assistant_conversation(
+                                "LLM_RESPONSE",
+                                serde_json::json!({ "response_text": prefixed, "source": "continuation_continue" }).to_string(),
+                                orchestrator::ConversationRelevance::Relevant,
+                            ).await;
+                            let _ = self.pubsub.publish(pubsub::SystemEvent::VoiceTtsStream {
+                                call_id: run_id.call_id().to_string(),
+                                audio_chunk_base64: format!("audio_chunk_{}", prefixed.len()),
+                                index: 0,
+                                is_end: true,
+                            });
+                            let _ = self
+                                .orch_tx
+                                .send(QueueEvent::Agent(AgentEvent::Finished {
+                                    run_id: run_id.clone(),
+                                    query_id: self.active_graph_query_id.clone(),
+                                    playback_generation: self.active_playback_generation,
+                                    result: prefixed,
+                                    relevance: orchestrator::ConversationRelevance::Relevant,
+                                }))
+                                .await;
+                        }
+                    }
+                }
             }
         }
     }
