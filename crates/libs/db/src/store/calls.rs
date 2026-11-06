@@ -1,8 +1,7 @@
-use super::{DatabaseStore, DbResult, postgres::error};
+use super::{postgres::error, DatabaseStore, DbResult};
 use crate::models::{AdminGraphNode, CallEndpointsRecord, CallSummaryRecord, StreamEventRecord};
 use chrono::Utc;
 use redis::AsyncCommands;
-
 
 impl DatabaseStore {
     pub fn generate_r2_vault_path(&self, agent_id: &str, category: &str, filename: &str) -> String {
@@ -55,23 +54,44 @@ impl DatabaseStore {
             created_at: Utc::now().to_rfc3339(),
         };
 
+        // Endpoint persistence is independent of transcript durability. The
+        // session actor enqueues summary work only after the terminal Redis
+        // stream append succeeds; doing it here races that append and creates
+        // empty-stream retries for an otherwise valid session ID.
         self.save(&record).await?;
-        self.enqueue_call_summary(session_id, 5).await
+        Ok(())
     }
 
-    pub async fn get_call_endpoints(&self, session_id: &str) -> DbResult<Option<CallEndpointsRecord>> { self.one(session_id).await }
+    pub async fn get_call_endpoints(
+        &self,
+        session_id: &str,
+    ) -> DbResult<Option<CallEndpointsRecord>> {
+        self.one(session_id).await
+    }
 
-    pub async fn get_all_call_endpoints(&self) -> DbResult<Vec<CallEndpointsRecord>> { self.all().await }
+    pub async fn get_all_call_endpoints(&self) -> DbResult<Vec<CallEndpointsRecord>> {
+        self.all().await
+    }
 
     pub async fn load_call_endpoints(&self) -> DbResult<Vec<CallEndpointsRecord>> {
-        self.fetch("SELECT row_to_json(t)::text FROM public.call_endpoints t ORDER BY created_at DESC", &[]).await
+        self.fetch(
+            "SELECT row_to_json(t)::text FROM public.call_endpoints t ORDER BY created_at DESC",
+            &[],
+        )
+        .await
     }
 
     pub async fn load_call_summaries(&self) -> DbResult<Vec<CallSummaryRecord>> {
-        self.fetch("SELECT row_to_json(t)::text FROM public.call_summaries t ORDER BY created_at DESC", &[]).await
+        self.fetch(
+            "SELECT row_to_json(t)::text FROM public.call_summaries t ORDER BY created_at DESC",
+            &[],
+        )
+        .await
     }
 
-    pub async fn load_call_summary(&self, call_id: &str) -> DbResult<Option<CallSummaryRecord>> { self.one(call_id).await }
+    pub async fn load_call_summary(&self, call_id: &str) -> DbResult<Option<CallSummaryRecord>> {
+        self.one(call_id).await
+    }
 
     pub async fn enqueue_call_summary(
         &self,
@@ -99,30 +119,55 @@ impl DatabaseStore {
         let run_id = format!("run-{session_id}");
         let events: Vec<StreamEventRecord> = self.fetch("SELECT row_to_json(t)::text FROM public.stream_events t WHERE stream = 'stream:conversation' AND session_id IN ($1, $2) ORDER BY id", &[session_id, &run_id]).await?;
         let transcript = transcript_from_events(events.iter());
-        if transcript.is_empty() { return Err(format!("No transcript events found for call {session_id}")); }
+        if transcript.is_empty() {
+            return Err(format!("No transcript events found for call {session_id}"));
+        }
         Ok(transcript)
     }
 
     pub async fn load_recent_stream_events(&self) -> DbResult<Vec<StreamEventRecord>> {
-        self.fetch("SELECT row_to_json(t)::text FROM public.stream_events t ORDER BY id DESC LIMIT 250", &[]).await
+        self.fetch(
+            "SELECT row_to_json(t)::text FROM public.stream_events t ORDER BY id DESC LIMIT 250",
+            &[],
+        )
+        .await
     }
     pub async fn load_session_events(&self, session_id: &str) -> DbResult<Vec<StreamEventRecord>> {
         self.fetch("SELECT row_to_json(t)::text FROM public.stream_events t WHERE session_id IN ($1, $2) ORDER BY id", &[session_id, &format!("run-{session_id}")]).await
     }
 
-    pub async fn get_call_summaries(&self) -> DbResult<Vec<CallSummaryRecord>> { self.all().await }
-
-    pub async fn get_call_summary(&self, call_id: &str) -> DbResult<Option<CallSummaryRecord>> { self.one(call_id).await }
-
-    pub async fn get_graph_nodes(&self) -> DbResult<Vec<AdminGraphNode>> { self.all().await }
-
-    pub async fn add_graph_node(&self, node: AdminGraphNode) -> DbResult<()> { self.save(&node).await }
-
-    pub async fn update_graph_node(&self, node_id: &str, instruction: String) -> DbResult<bool> {
-        Ok(sqlx::query("UPDATE public.admin_graph_nodes SET instruction = $2 WHERE id = $1").bind(node_id).bind(instruction).execute(&self.pool).await.map_err(error)?.rows_affected() > 0)
+    pub async fn get_call_summaries(&self) -> DbResult<Vec<CallSummaryRecord>> {
+        self.all().await
     }
 
-    pub async fn delete_graph_node(&self, node_id: &str) -> DbResult<bool> { self.delete::<AdminGraphNode>(node_id).await }
+    pub async fn get_call_summary(&self, call_id: &str) -> DbResult<Option<CallSummaryRecord>> {
+        self.one(call_id).await
+    }
+
+    pub async fn get_graph_nodes(&self) -> DbResult<Vec<AdminGraphNode>> {
+        self.all().await
+    }
+
+    pub async fn add_graph_node(&self, node: AdminGraphNode) -> DbResult<()> {
+        self.save(&node).await
+    }
+
+    pub async fn update_graph_node(&self, node_id: &str, instruction: String) -> DbResult<bool> {
+        Ok(
+            sqlx::query("UPDATE public.admin_graph_nodes SET instruction = $2 WHERE id = $1")
+                .bind(node_id)
+                .bind(instruction)
+                .execute(&self.pool)
+                .await
+                .map_err(error)?
+                .rows_affected()
+                > 0,
+        )
+    }
+
+    pub async fn delete_graph_node(&self, node_id: &str) -> DbResult<bool> {
+        self.delete::<AdminGraphNode>(node_id).await
+    }
 
     pub async fn push_redis_stream(
         &self,
@@ -156,7 +201,10 @@ impl DatabaseStore {
     ) -> Result<(), String> {
         if let Some(ref client) = self.redis_client {
             if let Ok(mut con) = client.get_multiplexed_async_connection().await {
-                return con.set_ex::<_, _, ()>(key, payload_json, ttl_seconds as u64).await.map_err(|_| "Redis write failed".into());
+                return con
+                    .set_ex::<_, _, ()>(key, payload_json, ttl_seconds as u64)
+                    .await
+                    .map_err(|_| "Redis write failed".into());
             }
         }
         Err("Redis client not available".to_string())
