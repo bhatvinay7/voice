@@ -1,15 +1,21 @@
+use db::DatabaseStore;
 use integration_tests::load_test_env;
 use orchestrator::{
-    AgentCmd, Orchestrator, QueueEvent, RunId, SessionActor,
-    TaskId, TaskStateRecord, TaskStatus, ToolEvent,
+    AgentCmd, Orchestrator, QueueEvent, RunId, SessionActor, TaskId, TaskStateRecord, TaskStatus,
+    ToolEvent,
 };
-use db::DatabaseStore;
 use pubsub::create_shared_bus;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-fn create_test_session_actor(session_id: &str) -> (SessionActor, mpsc::Receiver<QueueEvent>, mpsc::Receiver<AgentCmd>) {
+fn create_test_session_actor(
+    session_id: &str,
+) -> (
+    SessionActor,
+    mpsc::Receiver<QueueEvent>,
+    mpsc::Receiver<AgentCmd>,
+) {
     let pubsub = create_shared_bus(10);
     let db = DatabaseStore::new();
     let tool_client = integration_tests::create_test_tool_client();
@@ -21,13 +27,25 @@ fn create_test_session_actor(session_id: &str) -> (SessionActor, mpsc::Receiver<
     let agent_tx_shared = Arc::new(tokio::sync::Mutex::new(Some(agent_tx_out)));
 
     let agent_factory = Arc::new(move |_run_id: RunId, _orch_tx: mpsc::Sender<QueueEvent>| {
-        agent_tx_shared.try_lock().ok().and_then(|mut guard| guard.take()).unwrap_or_else(|| {
-            let (tx, _) = mpsc::channel(100);
-            tx
-        })
+        agent_tx_shared
+            .try_lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+            .unwrap_or_else(|| {
+                let (tx, _) = mpsc::channel(100);
+                tx
+            })
     });
 
-    let orchestrator = Orchestrator::new(pubsub, db, local_db, tool_client, orch_tx, db_tx, agent_factory);
+    let orchestrator = Orchestrator::new(
+        pubsub,
+        db,
+        local_db,
+        tool_client,
+        orch_tx,
+        db_tx,
+        agent_factory,
+    );
     let session_actor = SessionActor::new(session_id.to_string(), orchestrator);
 
     (session_actor, orch_rx, agent_rx_out)
@@ -46,7 +64,10 @@ async fn test_timeout_registration_heartbeat_and_sled_wal() {
 
     // 2. Verify Write-Ahead Log (WAL) written into Sled embedded DB
     let sled_val = session_actor.orch.local_db.get(db_key.as_bytes()).unwrap();
-    assert!(sled_val.is_some(), "Sled WAL must persist expiration timestamp for registered task");
+    assert!(
+        sled_val.is_some(),
+        "Sled WAL must persist expiration timestamp for registered task"
+    );
 
     // 3. Fire ToolEvent::Heartbeat -> updates/extends timeout in DelayQueue
     let task_record = TaskStateRecord {
@@ -54,6 +75,14 @@ async fn test_timeout_registration_heartbeat_and_sled_wal() {
         run_id: RunId("run-session-timeout-1".to_string()),
         tool_name: "heavy_rag_indexing".to_string(),
         args: serde_json::json!({}),
+        query_node_id: None,
+        query_id: None,
+        query_graph_version: 0,
+        playback_generation: 0,
+        dependent_query_ids: Vec::new(),
+        required_query_ids: Vec::new(),
+        completed_output: None,
+        answer_released: false,
         status: TaskStatus::Running,
         attempt: 1,
         max_retry: 3,
@@ -63,25 +92,44 @@ async fn test_timeout_registration_heartbeat_and_sled_wal() {
     };
     session_actor.tasks.insert(task_id.clone(), task_record);
 
-    session_actor.handle_tool_event(ToolEvent::Heartbeat {
-        task_id: task_id.clone(),
-        attempt: 1,
-        progress_pct: 50,
-    }).await;
+    session_actor
+        .handle_tool_event(ToolEvent::Heartbeat {
+            task_id: task_id.clone(),
+            attempt: 1,
+            query_id: None,
+            playback_generation: 0,
+            progress_pct: 50,
+        })
+        .await;
 
     // Sled WAL remains active during heartbeat
-    assert!(session_actor.orch.local_db.get(db_key.as_bytes()).unwrap().is_some());
+    assert!(session_actor
+        .orch
+        .local_db
+        .get(db_key.as_bytes())
+        .unwrap()
+        .is_some());
 
     // 4. Fire ToolEvent::Done -> removes timeout handle from in-memory queue & deletes from Sled DB
-    session_actor.handle_tool_event(ToolEvent::Done {
-        task_id: task_id.clone(),
-        attempt: 1,
-        output: serde_json::json!({ "success": true }),
-    }).await;
+    session_actor
+        .handle_tool_event(ToolEvent::Done {
+            task_id: task_id.clone(),
+            attempt: 1,
+            query_id: None,
+            playback_generation: 0,
+            output: serde_json::json!({ "success": true }),
+        })
+        .await;
 
-    assert_eq!(session_actor.tasks.get(&task_id).unwrap().status, TaskStatus::Succeeded);
+    assert_eq!(
+        session_actor.tasks.get(&task_id).unwrap().status,
+        TaskStatus::Succeeded
+    );
     let sled_cleared = session_actor.orch.local_db.get(db_key.as_bytes()).unwrap();
-    assert!(sled_cleared.is_none(), "Sled WAL key must be deleted immediately once task completes successfully");
+    assert!(
+        sled_cleared.is_none(),
+        "Sled WAL key must be deleted immediately once task completes successfully"
+    );
 }
 
 #[tokio::test]
@@ -97,6 +145,14 @@ async fn test_orchestrator_tool_failure_retry_loop_and_max_retry_exhaustion() {
         run_id: run_id.clone(),
         tool_name: "remote_crm_sync".to_string(),
         args: serde_json::json!({ "crm_id": "crm-888" }),
+        query_node_id: None,
+        query_id: None,
+        query_graph_version: 0,
+        playback_generation: 0,
+        dependent_query_ids: Vec::new(),
+        required_query_ids: Vec::new(),
+        completed_output: None,
+        answer_released: false,
         status: TaskStatus::Running,
         attempt: 1,
         max_retry: 2,
@@ -107,76 +163,123 @@ async fn test_orchestrator_tool_failure_retry_loop_and_max_retry_exhaustion() {
     session_actor.tasks.insert(task_id.clone(), task_record);
 
     // Attempt 1 fails
-    session_actor.handle_tool_event(ToolEvent::Failed {
-        task_id: task_id.clone(),
-        attempt: 1,
-        error: "Connection timeout to CRM".to_string(),
-        retryable: true,
-    }).await;
+    session_actor
+        .handle_tool_event(ToolEvent::Failed {
+            task_id: task_id.clone(),
+            attempt: 1,
+            query_id: None,
+            playback_generation: 0,
+            error: "Connection timeout to CRM".to_string(),
+            retryable: true,
+        })
+        .await;
 
     let updated_1 = session_actor.tasks.get(&task_id).unwrap();
-    assert_eq!(updated_1.status, TaskStatus::Retrying, "Task should transition to Retrying state on attempt 1 failure");
+    assert_eq!(
+        updated_1.status,
+        TaskStatus::Retrying,
+        "Task should transition to Retrying state on attempt 1 failure"
+    );
     assert_eq!(updated_1.attempt, 2);
     assert_eq!(updated_1.retry_count, 1);
 
     // Attempt 2 fails (Reaches max_retry = 2) -> Fails permanently
-    session_actor.handle_tool_event(ToolEvent::Failed {
-        task_id: task_id.clone(),
-        attempt: 2,
-        error: "Authentication refused".to_string(),
-        retryable: true,
-    }).await;
+    session_actor
+        .handle_tool_event(ToolEvent::Failed {
+            task_id: task_id.clone(),
+            attempt: 2,
+            query_id: None,
+            playback_generation: 0,
+            error: "Authentication refused".to_string(),
+            retryable: true,
+        })
+        .await;
 
     let updated_2 = session_actor.tasks.get(&task_id).unwrap();
-    assert_eq!(updated_2.status, TaskStatus::Failed, "Task must permanently fail after exhausting max retries");
+    assert_eq!(
+        updated_2.status,
+        TaskStatus::Failed,
+        "Task must permanently fail after exhausting max retries"
+    );
     assert_eq!(updated_2.retry_count, 2);
-    assert!(updated_2.error.as_ref().unwrap().contains("Authentication refused"));
+    assert!(updated_2
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("Authentication refused"));
 }
 
 #[tokio::test]
 async fn test_human_interviewer_override_and_transcript_discarding() {
     load_test_env();
 
-    let (mut session_actor, _orch_rx, mut agent_rx) = create_test_session_actor("session-override-1");
+    let (mut session_actor, _orch_rx, mut agent_rx) =
+        create_test_session_actor("session-override-1");
 
     // 1. Human interviewer speaks -> sends QueueEvent::InterviewerSpeech { active: true }
-    session_actor.handle_queue_event(QueueEvent::InterviewerSpeech {
-        session_id: "session-override-1".to_string(),
-        interviewer_id: "int-1".to_string(),
-        active: true,
-    }).await;
-    assert!(session_actor.ai_listen_muted, "SessionActor must flag ai_listen_muted active");
+    session_actor
+        .handle_queue_event(QueueEvent::InterviewerSpeech {
+            session_id: "session-override-1".to_string(),
+            interviewer_id: "int-1".to_string(),
+            active: true,
+        })
+        .await;
+    assert!(
+        session_actor.ai_listen_muted,
+        "SessionActor must flag ai_listen_muted active"
+    );
 
     // Verify Agent was sent SetAiListenMute { muted: true }
-    let cmd = agent_rx.recv().await.expect("Agent must receive command on interviewer speaking");
+    let cmd = agent_rx
+        .recv()
+        .await
+        .expect("Agent must receive command on interviewer speaking");
     match cmd {
-        AgentCmd::SetAiListenMute { muted, .. } => assert!(muted, "AI agent should be muted while interviewer speaks"),
+        AgentCmd::SetAiListenMute { muted, .. } => {
+            assert!(muted, "AI agent should be muted while interviewer speaks")
+        }
         other => panic!("Expected SetAiListenMute, got: {:?}", other),
     }
 
     // 2. Transcript chunks arriving while interviewer is speaking must be DISCARDED
-    session_actor.handle_queue_event(QueueEvent::SttTranscript {
-        session_id: "session-override-1".to_string(),
-        text: "User said something while interviewer was speaking".to_string(),
-        language: "en".to_string(),
-        is_final: true,
-    }).await;
+    session_actor
+        .handle_queue_event(QueueEvent::SttTranscript {
+            session_id: "session-override-1".to_string(),
+            text: "User said something while interviewer was speaking".to_string(),
+            language: "en".to_string(),
+            is_final: true,
+        })
+        .await;
 
     // Verify no UserInput command was forwarded to the Agent
-    assert!(agent_rx.try_recv().is_err(), "Agent must NOT receive UserInput when interviewer speaking");
+    assert!(
+        agent_rx.try_recv().is_err(),
+        "Agent must NOT receive UserInput when interviewer speaking"
+    );
 
     // 3. Interviewer stops speaking -> sends QueueEvent::InterviewerSpeech { active: false }
-    session_actor.handle_queue_event(QueueEvent::InterviewerSpeech {
-        session_id: "session-override-1".to_string(),
-        interviewer_id: "int-1".to_string(),
-        active: false,
-    }).await;
-    assert!(!session_actor.ai_listen_muted, "Interviewer speaking flag should clear");
+    session_actor
+        .handle_queue_event(QueueEvent::InterviewerSpeech {
+            session_id: "session-override-1".to_string(),
+            interviewer_id: "int-1".to_string(),
+            active: false,
+        })
+        .await;
+    assert!(
+        !session_actor.ai_listen_muted,
+        "Interviewer speaking flag should clear"
+    );
 
     // Verify Agent was unmuted
-    let cmd_unmute = agent_rx.recv().await.expect("Agent must receive unmute command");
+    let cmd_unmute = agent_rx
+        .recv()
+        .await
+        .expect("Agent must receive unmute command");
     match cmd_unmute {
-        AgentCmd::SetAiListenMute { muted, .. } => assert!(!muted, "AI agent should be unmuted after interviewer ends speech"),
+        AgentCmd::SetAiListenMute { muted, .. } => assert!(
+            !muted,
+            "AI agent should be unmuted after interviewer ends speech"
+        ),
         other => panic!("Expected SetAiListenMute false, got: {:?}", other),
     }
 }
@@ -200,7 +303,8 @@ async fn test_grpc_rag_tool_execution_through_orchestrator_brain() {
     let pubsub_clone = pubsub.clone();
     let agent_factory = Arc::new(move |run_id: RunId, orch_tx_in: mpsc::Sender<QueueEvent>| {
         let (agent_tx, agent_rx) = mpsc::channel(100);
-        let agent = agent::LlmAgentActor::new(run_id, db_clone.clone(), pubsub_clone.clone(), orch_tx_in);
+        let agent =
+            agent::LlmAgentActor::new(run_id, db_clone.clone(), pubsub_clone.clone(), orch_tx_in);
         tokio::spawn(async move {
             agent::LlmAgentActor::run_agent_loop(agent_rx, agent).await;
         });
@@ -223,28 +327,37 @@ async fn test_grpc_rag_tool_execution_through_orchestrator_brain() {
 
     // 3. Start a session
     let session_id = "session-grpc-brain-test-1".to_string();
-    orch_tx.send(QueueEvent::SessionStarted {
-        session_id: session_id.clone(),
-        user_id: "user-verified".to_string(),
-        language: "en".to_string(),
-    }).await.unwrap();
+    orch_tx
+        .send(QueueEvent::SessionStarted {
+            session_id: session_id.clone(),
+            user_id: "user-verified".to_string(),
+            language: "en".to_string(),
+        })
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 4. Send final STT user inquiry: "2 bedroom apartment in Dubai Marina"
-    orch_tx.send(QueueEvent::SttTranscript {
-        session_id: session_id.clone(),
-        text: "2 bedroom apartment in Dubai Marina".to_string(),
-        language: "en".to_string(),
-        is_final: true,
-    }).await.unwrap();
+    orch_tx
+        .send(QueueEvent::SttTranscript {
+            session_id: session_id.clone(),
+            text: "2 bedroom apartment in Dubai Marina".to_string(),
+            language: "en".to_string(),
+            is_final: true,
+        })
+        .await
+        .unwrap();
 
     // 5. Poll conversation stream until AI completes RAG search
     let mut resolved = false;
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if let Ok(events) = db.load_recent_stream_events().await {
-            if events.iter().any(|e| e.session_id.contains(&session_id) && e.event_type == "LLM_RESPONSE") {
+            if events
+                .iter()
+                .any(|e| e.session_id.contains(&session_id) && e.event_type == "LLM_RESPONSE")
+            {
                 resolved = true;
                 break;
             }

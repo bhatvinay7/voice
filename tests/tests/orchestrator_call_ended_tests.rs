@@ -226,7 +226,9 @@ async fn test_orchestrator_call_ended_saves_text_and_audio_presigned_urls_to_db(
 
     // 6. Verify text and audio presigned URLs are saved in db.call_endpoints
     let endpoint_record = db
-        .get_call_endpoints(&session_id).await.unwrap()
+        .get_call_endpoints(&session_id)
+        .await
+        .unwrap()
         .expect("CallEndpointsRecord must be saved to DB when call is ended");
 
     assert_eq!(endpoint_record.session_id, session_id);
@@ -245,7 +247,9 @@ async fn test_orchestrator_call_ended_saves_text_and_audio_presigned_urls_to_db(
 
     // 7. Verify text and audio presigned URLs are also saved in db.call_summaries
     let summary_record = db
-        .get_call_summary(&session_id).await.unwrap()
+        .get_call_summary(&session_id)
+        .await
+        .unwrap()
         .expect("CallSummaryRecord must be saved to DB when call is ended");
 
     assert_eq!(summary_record.call_id, session_id);
@@ -292,7 +296,9 @@ async fn test_db_store_call_ended_presigned_urls_persistence() {
     );
 
     // Persist call endpoints on call end
-    db.save_call_endpoints(&session_id, &audio_presigned, &text_presigned).await.unwrap();
+    db.save_call_endpoints(&session_id, &audio_presigned, &text_presigned)
+        .await
+        .unwrap();
     db.save_call_summary(
         &session_id,
         &user_id,
@@ -302,11 +308,15 @@ async fn test_db_store_call_ended_presigned_urls_persistence() {
         "AI Summary: Client verified and ready for contract signing.",
         250000,
         "Downtown Dubai",
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // 1. Verify get_call_endpoints retrieves exact text and audio presigned URLs
     let endpoints = db
-        .get_call_endpoints(&session_id).await.unwrap()
+        .get_call_endpoints(&session_id)
+        .await
+        .unwrap()
         .expect("Must retrieve call endpoints for ended session");
     assert_eq!(endpoints.session_id, session_id);
     assert_eq!(endpoints.audio_url, audio_presigned);
@@ -316,7 +326,9 @@ async fn test_db_store_call_ended_presigned_urls_persistence() {
 
     // 2. Verify get_call_summary retrieves exact text and audio presigned URLs
     let summary = db
-        .get_call_summary(&session_id).await.unwrap()
+        .get_call_summary(&session_id)
+        .await
+        .unwrap()
         .expect("Must retrieve call summary for ended session");
     assert_eq!(summary.call_id, session_id);
     assert_eq!(summary.user_id, user_id);
