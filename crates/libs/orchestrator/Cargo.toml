@@ -8,6 +8,7 @@ config = { path = "../config" }
 pubsub = { path = "../pubsub" }
 db = { path = "../db" }
 rag = { path = "../rag" }
+workflow = { path = "../workflow" }
 tokio = { workspace = true }
 tokio-util.workspace = true
 serde.workspace = true
@@ -27,7 +28,7 @@ dashmap = "6.2.1"
 parking_lot = "0.12.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls-native-roots"] }
 bytes = "1.5"
-scheduler = { version = "0.1.0", path = "../../services/scheduler" }
+control_plane = { version = "0.1.0", package = "control-plane", path = "../../services/control-plane" }
 prometheus = { workspace = true }
 lazy_static = { workspace = true }
 opentelemetry = { workspace = true }
@@ -37,6 +38,9 @@ tracing-opentelemetry = { workspace = true }
 tracing = { workspace = true }
 hmac = "0.12"
 sha2 = "0.10"
+base64 = { workspace = true }
+regex = { version = "1", features = ["unicode"] }
+uuid = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.12"

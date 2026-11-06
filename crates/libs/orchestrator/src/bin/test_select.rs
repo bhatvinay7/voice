@@ -44,10 +44,10 @@ async fn main() {
 
     tts_tx.send("Hello world".to_string()).await.unwrap();
     println!("Sent greeting");
-    
+
     // Hold clear_tx alive
     let _clear = clear_tx;
-    
+
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 }
 
