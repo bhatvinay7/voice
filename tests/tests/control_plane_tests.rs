@@ -1,4 +1,4 @@
-use scheduler::{CellControlService, SchedulerState, CellState};
+use control_plane::{CellControlService, CellState, SchedulerState};
 use std::time::Duration;
 
 #[tokio::test]
@@ -53,7 +53,9 @@ async fn test_slot_release_and_call_cancellation() {
         status: "Active".to_string(),
     });
 
-    state.session_to_cell.insert("session-101".to_string(), "cell-1".to_string());
+    state
+        .session_to_cell
+        .insert("session-101".to_string(), "cell-1".to_string());
     assert_eq!(*state.session_to_cell.get("session-101").unwrap(), "cell-1");
 
     state.session_to_cell.remove("session-101");
@@ -111,7 +113,7 @@ async fn test_sled_check_and_delayqueue_timeout_cancellation() {
 
 #[tokio::test]
 async fn test_grpc_connection_to_scheduler_check() {
-    use scheduler::grpc::cell_control_server::CellControlServer;
+    use control_plane::grpc::cell_control_server::CellControlServer;
     use tonic::transport::Server;
 
     let state = SchedulerState::new().unwrap();
@@ -133,5 +135,8 @@ async fn test_grpc_connection_to_scheduler_check() {
         .connect()
         .await;
 
-    assert!(channel.is_ok(), "gRPC client successfully connected to scheduler");
+    assert!(
+        channel.is_ok(),
+        "gRPC client successfully connected to scheduler"
+    );
 }
