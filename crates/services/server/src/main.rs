@@ -4,6 +4,7 @@ use orchestrator::{Orchestrator, ProtectedReceiver, QueueEvent, RunId};
 use pubsub::{create_shared_bus, PubSubBus};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
+use workflow::WorkflowRepository;
 
 mod api;
 
@@ -26,7 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = AppConfig::load().expect("Failed to load environment variables");
     let db = DatabaseStore::new();
-    db.initialize().await.expect("Neon database unavailable or migrations missing");
+    db.initialize()
+        .await
+        .expect("Neon database unavailable or migrations missing");
     let pubsub = create_shared_bus(100);
 
     // 1. Start Upstash Redis Streams -> PostgreSQL Async Worker Group
@@ -35,13 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (orch_tx, orch_rx) = mpsc::channel::<QueueEvent>(1024);
     let protected_orch_rx: ProtectedReceiver<QueueEvent> = Arc::new(Mutex::new(orch_rx));
 
-
-
     // Set up missing channels for Orchestrator
-    let scheduler_endpoint_str = std::env::var("SCHEDULER_ENDPOINT")
-        .unwrap_or_default();
-    let channel = tonic::transport::Endpoint::from_shared(scheduler_endpoint_str)
-        .expect("Invalid SCHEDULER_ENDPOINT")
+    let control_plane_endpoint_str = std::env::var("CONTROL_PLANE_ENDPOINT").unwrap_or_default();
+    let channel = tonic::transport::Endpoint::from_shared(control_plane_endpoint_str)
+        .expect("Invalid CONTROL_PLANE_ENDPOINT")
         .connect_lazy();
     let tool_client =
         orchestrator::grpc::tools::tool_execution_service_client::ToolExecutionServiceClient::new(
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (db_tx, db_rx) = mpsc::channel(1024);
     let protected_db_rx: db::actor::ProtectedDbReceiver = Arc::new(Mutex::new(db_rx));
-    
+
     // Initialize sled embedded DB (uses /data in kubernetes, falls back to local dir or temp dir)
     let local_db = sled::open("/data/orchestrator_db")
         .or_else(|_| sled::open(".local_data/orchestrator_db"))
@@ -66,15 +66,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(graph) => {
                 tracing::info!("[GraphDB] Connected to Neo4j at {}", uri);
                 // Push workflow DAG on startup
-                let workflow_nodes = db.get_graph_nodes().await?;
-                match db::push_workflow_dag_to_graph(&graph, &workflow_nodes).await {
-                    Ok(_) => tracing::info!("[GraphDB] Pushed {} workflow nodes to Graph DB", workflow_nodes.len()),
+                let workflows = WorkflowRepository::new(db.clone());
+                match workflows.sync_to_graph_database(&graph).await {
+                    Ok(count) => {
+                        tracing::info!("[GraphDB] Pushed {} workflow nodes to Graph DB", count)
+                    }
                     Err(e) => tracing::warn!("[GraphDB] Could not push workflow DAG: {}", e),
                 }
                 Some(graph)
             }
             Err(e) => {
-                tracing::warn!("[GraphDB] Could not connect to Neo4j ({}). Using Neon workflow storage.", e);
+                tracing::warn!(
+                    "[GraphDB] Could not connect to Neo4j ({}). Using Neon workflow storage.",
+                    e
+                );
                 None
             }
         }
@@ -86,13 +91,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_actor = db::actor::DbActor::new(db.clone(), neo4j_graph, local_db.clone());
     tokio::spawn(db::actor::DbActor::run_loop(protected_db_rx, db_actor));
 
-
     // 3. Initialize Orchestrator Core & LLM Agent Factory
     let db_clone = db.clone();
     let pubsub_clone = pubsub.clone();
     let agent_factory = Arc::new(move |run_id: RunId, orch_tx: mpsc::Sender<QueueEvent>| {
         let (agent_tx, agent_rx) = mpsc::channel(100);
-        let agent = agent::LlmAgentActor::new(run_id, db_clone.clone(), pubsub_clone.clone(), orch_tx);
+        let agent =
+            agent::LlmAgentActor::new(run_id, db_clone.clone(), pubsub_clone.clone(), orch_tx);
         tokio::spawn(async move {
             agent::LlmAgentActor::run_agent_loop(agent_rx, agent).await;
         });
@@ -119,27 +124,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // Start Cell Connection Manager
-    let scheduler_endpoint = std::env::var("SCHEDULER_ENDPOINT")
-        .unwrap_or_default();
-    let cell_id = std::env::var("POD_NAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "cell-dev-1".to_string());
+    let control_plane_endpoint = std::env::var("CONTROL_PLANE_ENDPOINT").unwrap_or_default();
+    let cell_id = std::env::var("POD_NAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "cell-dev-1".to_string());
     let conn_mgr = orchestrator::connection::ConnectionManager::new(
-        cell_id, scheduler_endpoint, orch_tx.clone(), slots.clone()
+        cell_id,
+        control_plane_endpoint,
+        orch_tx.clone(),
+        slots.clone(),
     );
     tokio::spawn(async move {
         conn_mgr.run().await;
     });
 
-
-
     let metrics_slots = slots.clone();
     tokio::spawn(async move {
-        let port = std::env::var("CELL_METRICS_PORT").ok().and_then(|v| v.parse::<u16>().ok()).unwrap_or(9091);
+        let port = std::env::var("CELL_METRICS_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(9091);
         let app = axum::Router::new().route("/metrics", axum::routing::get(move || {
             let slots = metrics_slots.clone();
             async move { format!("# TYPE voice_agent_slots_total gauge\nvoice_agent_slots_total {}\n# TYPE voice_agent_slots_used gauge\nvoice_agent_slots_used {}\n", slots.capacity, slots.used()) }
         }));
         match tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await {
-            Ok(listener) => { if let Err(error) = axum::serve(listener, app).await { tracing::error!(%error, "cell metrics server failed"); } }
+            Ok(listener) => {
+                if let Err(error) = axum::serve(listener, app).await {
+                    tracing::error!(%error, "cell metrics server failed");
+                }
+            }
             Err(error) => tracing::error!(%error, "cell metrics listener failed"),
         }
     });
@@ -164,4 +178,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

@@ -8,6 +8,7 @@ config = { path = "../../libs/config" }
 pubsub = { path = "../../libs/pubsub" }
 db = { path = "../../libs/db" }
 rag = { path = "../../libs/rag" }
+workflow = { path = "../../libs/workflow" }
 orchestrator = { path = "../../libs/orchestrator" }
 agent = { path = "../../libs/agent" }
 axum = { workspace = true }
