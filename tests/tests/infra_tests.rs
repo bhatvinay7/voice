@@ -7,12 +7,18 @@ async fn test_s3_upload_simulated() {
     let bucket = env::var("S3_BUCKET_NAME")
         .or_else(|_| env::var("R2_BUCKET_NAME"))
         .unwrap_or_default();
-    assert!(!bucket.is_empty(), "S3/R2 Bucket must be loaded from environment");
+    assert!(
+        !bucket.is_empty(),
+        "S3/R2 Bucket must be loaded from environment"
+    );
 
     let endpoint = env::var("S3_ENDPOINT")
         .or_else(|_| env::var("R2_ENDPOINT_URL"))
         .unwrap_or_default();
-    assert!(!endpoint.is_empty(), "S3/R2 endpoint must be configured in environment");
+    assert!(
+        !endpoint.is_empty(),
+        "S3/R2 endpoint must be configured in environment"
+    );
 }
 
 #[tokio::test]
@@ -31,5 +37,8 @@ async fn test_api_endpoints() {
     let port = env::var("SERVER_PORT")
         .or_else(|_| env::var("PORT"))
         .unwrap_or_default();
-    assert!(!port.is_empty(), "Server port must be defined in environment");
+    assert!(
+        !port.is_empty(),
+        "Server port must be defined in environment"
+    );
 }
