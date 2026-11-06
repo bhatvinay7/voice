@@ -1,3 +1,4 @@
+use crate::AppState;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -5,7 +6,6 @@ use axum::{
     },
     response::IntoResponse,
 };
-use crate::AppState;
 use orchestrator::QueueEvent;
 use serde::Deserialize;
 
@@ -36,7 +36,9 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
             // Try to parse the structured JSON message first
             match serde_json::from_str::<WsClientMessage>(&text) {
                 Ok(client_msg) => {
-                    if client_msg.session_id.starts_with("phone:") { continue; }
+                    if client_msg.session_id.starts_with("phone:") {
+                        continue;
+                    }
                     let session_id = client_msg.session_id.clone();
                     let lang = client_msg.language.unwrap_or_else(|| "en".to_string());
 
@@ -62,6 +64,7 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
                                     text: transcript_text,
                                     language: lang,
                                     is_final: true,
+                                    noise: None, // Client-side STT: no acoustic noise profile.
                                 })
                             } else {
                                 eprintln!("[WS] STT_TRANSCRIPT message missing 'text' field for session {}", client_msg.session_id);
@@ -69,7 +72,10 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
                             }
                         }
                         unknown => {
-                            eprintln!("[WS] Unknown message type '{}' from session {}", unknown, client_msg.session_id);
+                            eprintln!(
+                                "[WS] Unknown message type '{}' from session {}",
+                                unknown, client_msg.session_id
+                            );
                             None
                         }
                     };
