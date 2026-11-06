@@ -73,6 +73,8 @@ pub struct AppConfig {
     pub agent_system_prompt: String,
     pub agent_context_prompt_template: String,
     pub agent_edge_prompt_template: String,
+    /// Brief speech queued while a tool request is running; empty disables it.
+    pub tool_wait_tts_prompt: String,
     pub stt_prompt: String,
     pub vad_speech_probability_threshold: f32,
     pub vad_barge_in_probability_threshold: f32,
@@ -307,6 +309,7 @@ impl AppConfig {
             agent_system_prompt: env::var("AGENT_SYSTEM_PROMPT").unwrap_or_default(),
             agent_context_prompt_template: env::var("AGENT_CONTEXT_PROMPT_TEMPLATE").unwrap_or_default(),
             agent_edge_prompt_template: env::var("AGENT_EDGE_PROMPT_TEMPLATE").unwrap_or_default(),
+            tool_wait_tts_prompt: env::var("TOOL_WAIT_TTS_PROMPT").unwrap_or_default(),
             stt_prompt: env::var("STT_PROMPT").unwrap_or_default(),
             vad_speech_probability_threshold: env::var("VAD_SPEECH_PROBABILITY_THRESHOLD").ok().and_then(|value| value.parse().ok()).unwrap_or(0.15),
             vad_barge_in_probability_threshold: env::var("VAD_BARGE_IN_PROBABILITY_THRESHOLD").ok().and_then(|value| value.parse().ok()).unwrap_or(0.40),
