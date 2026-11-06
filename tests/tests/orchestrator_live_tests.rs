@@ -5,14 +5,17 @@ use std::time::Duration;
 async fn test_live_running_server_grpc_tool_calls_rag_and_bookings() {
     load_test_env();
 
-    // 1. Connect tonic client to the live running scheduler gRPC server dynamically from env
-    let endpoint_str = integration_tests::get_scheduler_endpoint();
+    // 1. Connect tonic client to the live running control-plane gRPC server dynamically from env
+    let endpoint_str = integration_tests::get_control_plane_endpoint();
     let channel = tonic::transport::Endpoint::from_shared(endpoint_str)
-        .expect("Valid scheduler endpoint")
+        .expect("Valid control-plane endpoint")
         .connect()
         .await
-        .expect("Must connect to live running scheduler gRPC server");
-    let mut tool_client = orchestrator::grpc::tools::tool_execution_service_client::ToolExecutionServiceClient::new(channel);
+        .expect("Must connect to live running control-plane gRPC server");
+    let mut tool_client =
+        orchestrator::grpc::tools::tool_execution_service_client::ToolExecutionServiceClient::new(
+            channel,
+        );
 
     // 2. Execute RAG Property Search tool call over live gRPC
     let search_req = tonic::Request::new(orchestrator::grpc::tools::ToolRequest {
@@ -21,7 +24,8 @@ async fn test_live_running_server_grpc_tool_calls_rag_and_bookings() {
         tool_name: "search_properties".to_string(),
         args_json: serde_json::json!({
             "query": "2 bedroom apartment in Dubai Marina under 120k"
-        }).to_string(),
+        })
+        .to_string(),
     });
 
     let search_resp = tool_client
@@ -30,17 +34,25 @@ async fn test_live_running_server_grpc_tool_calls_rag_and_bookings() {
         .expect("gRPC ExecuteTool for search_properties must succeed")
         .into_inner();
 
-    assert!(search_resp.success, "search_properties gRPC call must return success = true");
+    assert!(
+        search_resp.success,
+        "search_properties gRPC call must return success = true"
+    );
     let search_data: serde_json::Value = serde_json::from_str(&search_resp.result_json)
         .expect("gRPC result_json must be valid JSON");
     assert!(search_data["success"].as_bool().unwrap_or(false));
     let resp_text = search_data["response_text"].as_str().unwrap_or("");
     assert!(
-        resp_text.contains("Dubai Marina") || resp_text.contains("apartment") || resp_text.contains("AED"),
+        resp_text.contains("Dubai Marina")
+            || resp_text.contains("apartment")
+            || resp_text.contains("AED"),
         "RAG response text must contain property details: {}",
         resp_text
     );
-    assert!(search_data["total_found"].as_u64().unwrap_or(0) > 0, "RAG search must find listings");
+    assert!(
+        search_data["total_found"].as_u64().unwrap_or(0) > 0,
+        "RAG search must find listings"
+    );
 
     // 3. Execute Booking tool call with unverified user -> KYC verification check
     let unverified_booking_req = tonic::Request::new(orchestrator::grpc::tools::ToolRequest {
@@ -51,7 +63,8 @@ async fn test_live_running_server_grpc_tool_calls_rag_and_bookings() {
             "listing_id": "prop-101",
             "user_id": "user-unverified-kyc-check",
             "slot_time": "2026-10-15T10:00:00Z"
-        }).to_string(),
+        })
+        .to_string(),
     });
 
     let unverified_resp = tool_client
@@ -60,9 +73,12 @@ async fn test_live_running_server_grpc_tool_calls_rag_and_bookings() {
         .expect("gRPC ExecuteTool for unverified booking must return response")
         .into_inner();
 
-    let unverified_data: serde_json::Value = serde_json::from_str(&unverified_resp.result_json)
-        .expect("result_json must be valid JSON");
-    assert!(!unverified_data["success"].as_bool().unwrap_or(true), "Unverified user must not be able to book viewing slot without Emirates ID verification");
+    let unverified_data: serde_json::Value =
+        serde_json::from_str(&unverified_resp.result_json).expect("result_json must be valid JSON");
+    assert!(
+        !unverified_data["success"].as_bool().unwrap_or(true),
+        "Unverified user must not be able to book viewing slot without Emirates ID verification"
+    );
 
     // 4. Execute Booking tool call with verified user -> Successful booking
     let verified_booking_req = tonic::Request::new(orchestrator::grpc::tools::ToolRequest {
@@ -73,7 +89,8 @@ async fn test_live_running_server_grpc_tool_calls_rag_and_bookings() {
             "listing_id": "prop-101",
             "user_id": "user-verified",
             "slot_time": "2026-10-15T14:00:00Z"
-        }).to_string(),
+        })
+        .to_string(),
     });
 
     let verified_resp = tool_client
@@ -82,9 +99,12 @@ async fn test_live_running_server_grpc_tool_calls_rag_and_bookings() {
         .expect("gRPC ExecuteTool for verified booking must succeed")
         .into_inner();
 
-    let verified_data: serde_json::Value = serde_json::from_str(&verified_resp.result_json)
-        .expect("result_json must be valid JSON");
-    assert!(verified_data["success"].as_bool().unwrap_or(false), "Verified user must successfully book slot");
+    let verified_data: serde_json::Value =
+        serde_json::from_str(&verified_resp.result_json).expect("result_json must be valid JSON");
+    assert!(
+        verified_data["success"].as_bool().unwrap_or(false),
+        "Verified user must successfully book slot"
+    );
 }
 
 #[tokio::test]
@@ -111,7 +131,11 @@ async fn test_live_running_server_user_call_ai_response_and_real_rag_websocket()
         .await
         .expect("POST /api/calls/session must succeed");
 
-    assert_eq!(init_resp.status(), 200, "Call session init must return HTTP 200");
+    assert_eq!(
+        init_resp.status(),
+        200,
+        "Call session init must return HTTP 200"
+    );
     let init_json: serde_json::Value = init_resp.json().await.expect("Must parse JSON body");
     assert!(init_json["success"].as_bool().unwrap_or(false));
     let token = init_json["livekit_token"].as_str().unwrap_or("");
@@ -125,7 +149,9 @@ async fn test_live_running_server_user_call_ai_response_and_real_rag_websocket()
     // 3. User sends voice prompt transcript over WebSocket
     let user_transcript = "I am looking for a 2 bedroom apartment in Dubai Marina";
     ws_stream
-        .send(tokio_tungstenite::tungstenite::Message::Text(user_transcript.to_string().into()))
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            user_transcript.to_string().into(),
+        ))
         .await
         .expect("Must send transcript text over WebSocket");
 
@@ -139,7 +165,9 @@ async fn test_live_running_server_user_call_ai_response_and_real_rag_websocket()
         if let Ok(resp) = client.get(&suggestions_url).send().await {
             if resp.status() == 200 {
                 let val: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
-                if val.get("suggestions").is_some() || val.get("success").and_then(|s| s.as_bool()) == Some(true) {
+                if val.get("suggestions").is_some()
+                    || val.get("success").and_then(|s| s.as_bool()) == Some(true)
+                {
                     got_suggestions = true;
                     break;
                 }
@@ -148,8 +176,16 @@ async fn test_live_running_server_user_call_ai_response_and_real_rag_websocket()
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let check_resp = client.get(&suggestions_url).send().await.expect("Must reach suggestions endpoint");
-    assert_eq!(check_resp.status(), 200, "Suggestions endpoint must return HTTP 200");
+    let check_resp = client
+        .get(&suggestions_url)
+        .send()
+        .await
+        .expect("Must reach suggestions endpoint");
+    assert_eq!(
+        check_resp.status(),
+        200,
+        "Suggestions endpoint must return HTTP 200"
+    );
     let _ = got_suggestions;
 }
 
@@ -201,13 +237,17 @@ async fn test_live_running_server_barge_in_and_pause_call() {
         .expect("Must connect to live WebSocket");
 
     ws_stream
-        .send(tokio_tungstenite::tungstenite::Message::Text("BARGE_IN".to_string().into()))
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "BARGE_IN".to_string().into(),
+        ))
         .await
         .expect("Must send BARGE_IN message without error");
 
     // Verify socket remains open and healthy after barge-in trigger
     ws_stream
-        .send(tokio_tungstenite::tungstenite::Message::Ping(vec![1, 2, 3].into()))
+        .send(tokio_tungstenite::tungstenite::Message::Ping(
+            vec![1, 2, 3].into(),
+        ))
         .await
         .expect("WebSocket ping must succeed after barge-in");
 }
@@ -228,9 +268,21 @@ async fn test_live_running_scheduler_metrics_and_cell_capacity() {
         .expect("GET metrics must succeed");
 
     assert_eq!(metrics_resp.status(), 200);
-    let body = metrics_resp.text().await.expect("Metrics body must be string");
+    let body = metrics_resp
+        .text()
+        .await
+        .expect("Metrics body must be string");
 
-    assert!(body.contains("voice_live_cells"), "Metrics must report voice_live_cells");
-    assert!(body.contains("voice_total_free_slots"), "Metrics must report voice_total_free_slots");
-    assert!(body.contains("voice_total_active_sessions"), "Metrics must report voice_total_active_sessions");
+    assert!(
+        body.contains("voice_live_cells"),
+        "Metrics must report voice_live_cells"
+    );
+    assert!(
+        body.contains("voice_total_free_slots"),
+        "Metrics must report voice_total_free_slots"
+    );
+    assert!(
+        body.contains("voice_total_active_sessions"),
+        "Metrics must report voice_total_active_sessions"
+    );
 }
