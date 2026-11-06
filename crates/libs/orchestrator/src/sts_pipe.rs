@@ -1,10 +1,18 @@
 use crate::models::S3DumpData;
 use crate::sts_vad::spawn_audio_track_processor;
-use crate::tts_playback::{play_tts_stream, TtsPlaybackResult};
+use crate::tts_playback::{
+    play_tts_stream, PlaybackClear, PlaybackGenerationGate, TtsPlaybackResult,
+};
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+
+#[derive(Debug)]
+struct PlaybackRequest {
+    generation: u64,
+    text: String,
+}
 
 pub use crate::models::{StsPipelineCmd, StsPipelineEvent};
 
@@ -64,6 +72,7 @@ impl StsPipelineWorker {
                         cfg.groq_stt_url.clone(),
                         cfg.stt_model.clone(),
                         cfg.stt_prompt.clone(),
+                        cfg.stt_language.clone(),
                     ));
                     let tts = std::sync::Arc::new(crate::tts_pipeline::TtsPipeline::new(
                         cfg.openai_api_key.clone(),
@@ -74,7 +83,7 @@ impl StsPipelineWorker {
                     ));
 
                     // Channel to receive transcription results from the backpressure audio worker
-                    let (res_tx, mut res_rx) = mpsc::channel::<String>(100);
+                    let (res_tx, mut res_rx) = mpsc::channel::<(String, crate::audio_gate::NoiseProfile)>(100);
                     let audio_tx = stt.clone().spawn_call_audio_worker(
                         session_id.clone(),
                         STT_AUDIO_QUEUE_CAPACITY,
@@ -83,10 +92,11 @@ impl StsPipelineWorker {
 
                     let event_tx_transcript = event_tx_clone.clone();
                     tokio::spawn(async move {
-                        while let Some(text) = res_rx.recv().await {
+                        while let Some((text, noise)) = res_rx.recv().await {
                             let _ = event_tx_transcript.send(StsPipelineEvent::UserTranscriptChunk {
                                 text,
                                 is_final: true,
+                                noise: Some(noise),
                             }).await;
                         }
                     });
@@ -108,9 +118,11 @@ impl StsPipelineWorker {
                         error!("STS Pipeline: Failed to publish assistant audio track: {}", e);
                     }
 
-                    // Create a dedicated back-pressured channel for sequential TTS rendering and WebRTC playback
-                    let (tts_tx, mut tts_rx) = mpsc::channel::<String>(50);
-                    let (clear_tx, mut clear_rx) = mpsc::channel::<()>(10);
+                    // Physically isolated ingress queues. Fast planner output
+                    // has priority and can revoke only queued agent audio.
+                    let (agent_tts_tx, mut agent_tts_rx) = mpsc::channel::<PlaybackRequest>(50);
+                    let (fast_tts_tx, mut fast_tts_rx) = mpsc::channel::<PlaybackRequest>(16);
+                    let (clear_tx, mut clear_rx) = mpsc::channel::<PlaybackClear>(10);
                     let tts_worker_source = tts_audio_source.clone();
                     let tts_worker_clone = tts.clone();
                     let recording_tx_tts = recording_tx.clone();
@@ -125,10 +137,12 @@ impl StsPipelineWorker {
                     tokio::spawn(async move {
                         info!("STS Pipeline: Spawning dedicated per-call TTS channel worker for call '{}'", session_id_tts);
                         let mut worker_running = true;
+                        let mut active_generation = PlaybackGenerationGate::default();
                         while worker_running {
                             let worker_source_ref = tts_worker_source.clone();
                             let worker_tts_ref = tts_worker_clone.clone();
-                            let tts_rx_ref = &mut tts_rx;
+                                let agent_rx_ref = &mut agent_tts_rx;
+                                let fast_rx_ref = &mut fast_tts_rx;
                             let clear_rx_ref = &mut clear_rx;
                             let ai_is_speaking_tts_ref = ai_is_speaking_tts.clone();
                             let recording_tx_ref = recording_tx_tts.clone();
@@ -137,40 +151,55 @@ impl StsPipelineWorker {
 
                             let result = AssertUnwindSafe(async move {
                                 loop {
-                                    tokio::select! {
-                                        Some(_) = clear_rx_ref.recv() => {
-                                            while let Ok(_) = tts_rx_ref.try_recv() {}
-                                            worker_source_ref.clear_buffer();
-                                        }
-                                        text_opt = tts_rx_ref.recv() => {
-                                            match text_opt {
-                                                Some(text) => {
-                                                    info!("STS Pipeline: TTS worker received {} text chars", text.chars().count());
-                                                    match play_tts_stream(
-                                                        &worker_tts_ref,
-                                                        &text,
-                                                        &worker_source_ref,
-                                                        clear_rx_ref,
-                                                        tts_rx_ref,
-                                                        &ai_is_speaking_tts_ref,
-                                                        &recording_tx_ref,
-                                                        &session_id_ref,
-                                                        recording_started_at_tts,
-                                                    ).await {
-                                                        Ok(TtsPlaybackResult::Completed) => {
-                                                            let _ = event_tx_complete_ref.send(StsPipelineEvent::AudioComplete).await;
-                                                        }
-                                                        Ok(TtsPlaybackResult::Interrupted) => {}
-                                                        Err(error) => {
-                                                            error!("STS Pipeline: TTS stream failed: {}", error);
-                                                            let _ = event_tx_complete_ref
-                                                                .send(StsPipelineEvent::Error(error))
-                                                                .await;
-                                                        }
-                                                    }
+                                    let next = tokio::select! {
+                                        biased;
+                                        clear = clear_rx_ref.recv() => {
+                                            match clear {
+                                                Some(PlaybackClear::AgentOnly) => while agent_rx_ref.try_recv().is_ok() {},
+                                                Some(PlaybackClear::All) => {
+                                                    while agent_rx_ref.try_recv().is_ok() {}
+                                                    while fast_rx_ref.try_recv().is_ok() {}
                                                 }
-                                                None => break, // Channel closed
+                                                None => break,
                                             }
+                                            worker_source_ref.clear_buffer();
+                                            continue;
+                                        }
+                                        fast = fast_rx_ref.recv() => fast,
+                                        agent = agent_rx_ref.recv() => agent,
+                                    };
+                                    let Some(request) = next else { break; };
+                                    if !active_generation.accepts(request.generation) {
+                                        tracing::debug!(request_generation = request.generation, active_generation = active_generation.current(), "dropping stale STS playback request");
+                                        continue;
+                                    }
+                                    while active_generation.current() < request.generation {
+                                        active_generation.preempt();
+                                    }
+                                    info!(generation = request.generation, chars = request.text.chars().count(), "STS Pipeline: TTS worker received source-isolated request");
+                                    match play_tts_stream(
+                                        &worker_tts_ref,
+                                        &request.text,
+                                        &worker_source_ref,
+                                        clear_rx_ref,
+                                        &ai_is_speaking_tts_ref,
+                                        &recording_tx_ref,
+                                        &session_id_ref,
+                                        recording_started_at_tts,
+                                    ).await {
+                                        Ok(TtsPlaybackResult::Completed) => {
+                                            let _ = event_tx_complete_ref.send(StsPipelineEvent::AudioComplete).await;
+                                        }
+                                        Ok(TtsPlaybackResult::Interrupted(PlaybackClear::AgentOnly)) => {
+                                            while agent_rx_ref.try_recv().is_ok() {}
+                                        }
+                                        Ok(TtsPlaybackResult::Interrupted(PlaybackClear::All)) => {
+                                            while agent_rx_ref.try_recv().is_ok() {}
+                                            while fast_rx_ref.try_recv().is_ok() {}
+                                        }
+                                        Err(error) => {
+                                            error!("STS Pipeline: TTS stream failed: {}", error);
+                                            let _ = event_tx_complete_ref.send(StsPipelineEvent::Error(error)).await;
                                         }
                                     }
                                 }
@@ -188,15 +217,12 @@ impl StsPipelineWorker {
                             }
                         }
                     });
-                    match std::env::var("AI_GREETING") {
-                        Ok(greeting) if !greeting.trim().is_empty() => {
-                            if let Err(error) = tts_tx.send(greeting).await {
-                                error!("STS Pipeline: Failed to queue configured greeting: {}", error);
-                            }
-                        }
-                        Ok(_) => warn!("AI_GREETING is empty; skipping the initial greeting"),
-                        Err(error) => warn!("AI_GREETING is unavailable; skipping the initial greeting: {}", error),
-                    }
+                    // Wait for the caller's audio track before greeting. This
+                    // prevents web/mobile clients that join just after the
+                    // backend from missing audio played before they connect.
+                    let mut greeting_pending = std::env::var("AI_GREETING")
+                        .ok()
+                        .filter(|greeting| !greeting.trim().is_empty());
 
                     let attached_tracks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
@@ -207,6 +233,7 @@ impl StsPipelineWorker {
                                 let track_sid = audio_track.sid().to_string();
                                 if attached_tracks.lock().unwrap().insert(track_sid.clone()) {
                                     info!("STS Pipeline: Attaching to pre-existing remote audio track {} from participant {}", track_sid, participant.identity());
+                                    let vad_params = crate::audio_gate::VadParams::from_config(&cfg);
                                     spawn_audio_track_processor(
                                         session_id.clone(),
                                         audio_track,
@@ -215,39 +242,57 @@ impl StsPipelineWorker {
                                         recording_tx.clone(),
                                         ai_is_speaking.clone(),
                                         recording_started_at,
-                                        cfg.vad_speech_probability_threshold,
-                                        cfg.vad_barge_in_probability_threshold,
-                                        cfg.vad_min_speech_amplitude,
-                                        cfg.vad_energy_bypass_amplitude,
-                                        cfg.vad_barge_in_amplitude,
-                                        cfg.vad_end_of_speech_timeout_ms,
+                                        vad_params,
                                     );
+                                        if let Some(greeting) = greeting_pending.take() {
+                                            if let Err(error) = agent_tts_tx.send(PlaybackRequest { generation: 0, text: greeting }).await {
+                                                error!("STS Pipeline: Failed to queue configured greeting: {}", error);
+                                            }
+                                        }
                                 }
                             }
                         }
                     }
 
+                    let mut playback_generation = PlaybackGenerationGate::default();
                     loop {
                         tokio::select! {
                             cmd = cmd_rx_ref.recv() => {
                                 match cmd {
-                                    Some(StsPipelineCmd::InjectContext { text }) => {
-                                        info!("STS Pipeline: Injecting context and queuing TTS: {}", text);
-                                        if let Err(e) = tts_tx.send(text).await {
+                                    Some(StsPipelineCmd::InjectContext { text }) | Some(StsPipelineCmd::InjectAgentContext { text }) => {
+                                        info!("STS Pipeline: queuing main-agent TTS response");
+                                        if let Err(e) = agent_tts_tx.send(PlaybackRequest { generation: playback_generation.current(), text }).await {
                                             error!("STS Pipeline: Failed to queue TTS request: {}", e);
+                                        }
+                                    },
+                                    Some(StsPipelineCmd::InjectFastContext { text }) => {
+                                        // Fast planner output supersedes any unplayed main-agent
+                                        // answer. Clear transport playback and queued TTS before
+                                        // placing the clarification/acknowledgement on STS.
+                                        info!("STS Pipeline: fast-planner speech preempting main-agent TTS");
+                                        playback_generation.preempt();
+                                        ai_is_speaking.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        tts_audio_source.clear_buffer();
+                                        let _ = clear_tx.send(PlaybackClear::AgentOnly).await;
+                                        if let Err(e) = fast_tts_tx.send(PlaybackRequest { generation: playback_generation.current(), text }).await {
+                                            error!("STS Pipeline: Failed to queue fast-planner TTS request: {}", e);
                                         }
                                     },
                                      Some(StsPipelineCmd::Stop) => {
                                         info!("STS Pipeline: Barge-in detected! Stopping TTS instantly and clearing queues.");
+                                        playback_generation.preempt();
                                         ai_is_speaking.store(false, std::sync::atomic::Ordering::SeqCst);
                                         tts_audio_source.clear_buffer();
-                                        let _ = clear_tx.try_send(());
+                                        // The clear signal is ordered and must not be
+                                        // dropped: it drains queued TTS text before the
+                                        // next user turn is allowed to reach STS.
+                                        let _ = clear_tx.send(PlaybackClear::All).await;
                                     },
                                     Some(StsPipelineCmd::Shutdown) => {
                                         info!("STS Pipeline: Shutting down session {}", session_id);
                                         ai_is_speaking.store(false, std::sync::atomic::Ordering::SeqCst);
                                         tts_audio_source.clear_buffer();
-                                        let _ = clear_tx.try_send(());
+                                        let _ = clear_tx.send(PlaybackClear::All).await;
                                         let _ = room.close().await;
                                         worker_active = false;
                                         break;
@@ -267,6 +312,7 @@ impl StsPipelineWorker {
                                             let track_sid = audio_track.sid().to_string();
                                             if attached_tracks.lock().unwrap().insert(track_sid.clone()) {
                                                 info!("STS Pipeline: Audio track {} received, attaching NativeAudioStream for live STT transcription...", track_sid);
+                                                let vad_params = crate::audio_gate::VadParams::from_config(&cfg);
                                                 spawn_audio_track_processor(
                                                     session_id.clone(),
                                                     audio_track,
@@ -275,13 +321,13 @@ impl StsPipelineWorker {
                                                     recording_tx.clone(),
                                                     ai_is_speaking.clone(),
                                                     recording_started_at,
-                                                    cfg.vad_speech_probability_threshold,
-                                                    cfg.vad_barge_in_probability_threshold,
-                                                    cfg.vad_min_speech_amplitude,
-                                                    cfg.vad_energy_bypass_amplitude,
-                                                    cfg.vad_barge_in_amplitude,
-                                                    cfg.vad_end_of_speech_timeout_ms,
+                                                    vad_params,
                                                 );
+                                                if let Some(greeting) = greeting_pending.take() {
+                                                    if let Err(error) = agent_tts_tx.send(PlaybackRequest { generation: playback_generation.current(), text: greeting }).await {
+                                                        error!("STS Pipeline: Failed to queue configured greeting: {}", error);
+                                                    }
+                                                }
                                             } else {
                                                 info!("STS Pipeline: Audio track {} already attached, ignoring duplicate subscription event.", track_sid);
                                             }
