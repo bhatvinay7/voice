@@ -1,6 +1,6 @@
 # Real Estate Voice Assistant
 
-A Rust and Next.js application for real-estate voice calls, property and knowledge search, viewing bookings, contract review, and call summaries. The development Compose stack runs the web app, backend API, scheduler, and summary worker. Neon PostgreSQL, LiveKit, Redis, Cloudflare R2, and the configured LLM provider are external dependencies.
+A Rust and Next.js application for real-estate voice calls, property and knowledge search, viewing bookings, contract review, and call summaries. The development Compose stack runs the web app, backend API, control-plane, and summary worker. Neon PostgreSQL, LiveKit, Redis, Cloudflare R2, and the configured LLM provider are external dependencies.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ flowchart TB
     Session[Per-call SessionActor]
     STS["LiveKit STS worker<br/>VAD, STT, TTS"]
     Agent[LLM agent actor]
-    Scheduler["Scheduler gRPC<br/>cell control and tool execution"]
+    ControlPlane["Control-plane gRPC<br/>cell control and tool execution"]
     RAG["RAG pipeline<br/>listings and knowledge"]
     Fanout["Per-session transcript broadcast<br/>S3 and Redis subscribers"]
     Recording["Recording worker<br/>sample-timed PCM → stereo WAV"]
@@ -27,7 +27,7 @@ flowchart TB
     Backend -->|SSE suggestions| Browser
     Browser <-->|WebRTC media| LiveKit
     Backend --> Dispatcher --> Session
-    Backend <-->|CellControl gRPC stream| Scheduler
+    Backend <-->|CellControl gRPC stream| ControlPlane
     Session --> STS
     Session --> Agent
     STS <-->|agent audio tracks| LiveKit
@@ -37,8 +37,8 @@ flowchart TB
     Fanout -->|transcript.txt| Recording
     Fanout -->|session-named stream| Redis
     STS -->|user and assistant PCM| Recording
-    Agent -->|tool requests| Scheduler
-    Scheduler --> RAG --> Store
+    Agent -->|tool requests| ControlPlane
+    ControlPlane --> RAG --> Store
     Redis -->|conversation worker persists events| Store
     Recording -->|assembled WAV| R2
     Recording -->|recording URL| Store
@@ -50,7 +50,44 @@ flowchart TB
 
 ## Call workflow
 
-When a caller starts a session, the backend creates a per-call `SessionActor` and returns the credentials needed to join a LiveKit room. The browser sends and receives audio directly through LiveKit; the backend's STS worker joins the same room to process incoming audio and publish the assistant's voice. VAD detects speech, STT produces a transcript, and the agent uses listing or knowledge context to answer. When a tool is needed, the agent calls the scheduler over gRPC, where the RAG and booking tools run.
+When a caller starts a session, the backend creates a per-call `SessionActor` and returns the credentials needed to join a LiveKit room. The browser sends and receives audio directly through LiveKit; the backend's STS worker joins the same room to process incoming audio and publish the assistant's voice. VAD detects speech, STT produces a transcript, and the agent uses listing or knowledge context to answer. When a tool is needed, the agent calls the control-plane over gRPC, where the RAG and booking tools run.
+
+## Search, agent, and voice modes
+
+Manual property search uses `POST /api/listings/search` without a `session_id`
+and with structured filters
+(`location`, `max_price_aed`, `bedrooms`, and `listing_type`). It reads listings
+directly and does not invoke an LLM, RAG, a tool, or a voice session.
+
+Agent requests include an existing `session_id`. The session actor
+owns its agent, task cancellation tokens, recording pipeline, and transcript
+fanout. It sends only the typed `search_properties` and `book_viewing_slot`
+tool requests to the control-plane. The orchestrator has no in-process tool
+fallback, preventing single-process and deployed behaviour from diverging.
+
+The product Agent Mode switch controls whether the web client starts a voice
+session; it does not choose a speech pipeline. Configure the server pipeline in
+the relevant service `.env` file:
+
+```env
+# Whisper STT -> LLM -> TTS
+STS_MODE=STS_NORMAL
+
+# Realtime streaming WebSocket pipeline
+STS_MODE=STS_STREAM
+```
+
+Each session has a bounded inbox and task-owned cancellation tokens. The global
+dispatcher releases its queue lock before delivering to a session, so a blocked
+or cancelled call does not hold up unrelated sessions.
+
+## Workflow graph lifecycle
+
+`crates/libs/workflow` is the graph package. `WorkflowRepository` owns durable
+admin graph creation, retrieval, update, and deletion. A call receives a
+`SessionWorkflow` copy of that definition; it is released on call cancellation
+or when the 25-minute session reaper ends the call. Releasing a session graph
+clears only in-memory run state and never removes the durable admin graph.
 
 User and assistant PCM frames are collected alongside the live call. Each call owns a Rust broadcast channel: the S3 subscriber writes `transcript.txt` beside the stereo 16 kHz WAV, while the Redis subscriber writes the same events to a stream named exactly after the session. Redis conversation streams have no TTL. The conversation worker reads the Redis stream, commits events to Neon idempotently, then deletes the Redis stream only after that commit succeeds. S3 is an archive and is never used to update Neon. Each agent actor has its own MPSC Redis-poll worker and delay queue, so it can refresh session context without blocking its command loop.
 
@@ -60,7 +97,7 @@ User and assistant PCM frames are collected alongside the live call. Each call o
 |---|---|
 | `web` | Next.js caller and admin interface. |
 | `backend` | Axum APIs, LiveKit token issuance, session orchestration, and SSE. |
-| `scheduler` | Cell control stream and gRPC tool execution for RAG and bookings. |
+| `control-plane` | Cell control stream and gRPC tool execution for RAG and bookings. |
 | `worker` | Redis summary-job polling, transcript loading, and LLM summaries. |
 
 ## Run locally
@@ -91,13 +128,13 @@ For `sip` and `custom`, the external gateway must translate its provider protoco
 
 `GET /api/telephony/status` reports the selected provider and whether its settings are present, without returning credentials. Real provider credentials, a routed phone number and a public HTTPS/WSS endpoint are required for a live call test; local protocol tests do not make billable calls.
 
-The web app is served on port `3000`, the backend on `4000`, and the scheduler gRPC service on `50051` (metrics on `9090`).
+The web app is served on port `3000`, the backend on `4000`, and the control-plane gRPC service on `50051` (metrics on `9090`).
 
 ## Repository layout
 
 - `apps/web` — Next.js application
 - `crates/services/server` — backend API
-- `crates/services/scheduler` — cell control and tool execution service
+- `crates/services/control-plane` — cell control and tool execution service
 - `crates/services/worker` — call summary worker
 - `crates/libs/orchestrator` — session actors, LiveKit STS, recording assembly, and R2 upload
 - `crates/libs/agent` — LLM agent and tool request handling
@@ -105,7 +142,7 @@ The web app is served on port `3000`, the backend on `4000`, and the scheduler g
 - `crates/libs/db` — domain store and Redis integration
 - `proto` — gRPC protocol definitions
 
-Scheduler admission, discovery, routing boundaries, and rollout requirements are documented in [docs/scheduler-routing.md](docs/scheduler-routing.md).
+Control-plane admission, discovery, routing boundaries, and rollout requirements are documented in [docs/control-plane-routing.md](docs/control-plane-routing.md).
 
 ## PostgreSQL schema migrations
 

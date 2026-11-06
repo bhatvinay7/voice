@@ -1,16 +1,14 @@
-version: '3.8'
-
 services:
-  scheduler:
-    image: ${REGISTRY:-docker.io/myrepo}/real-estate-scheduler:${TAG:-latest}
+  control-plane:
+    image: ${REGISTRY:-docker.io/myrepo}/real-estate-control-plane:${TAG:-latest}
     build:
       context: .
-      dockerfile: crates/services/scheduler/Dockerfile
+      dockerfile: crates/services/control-plane/Dockerfile
     ports:
       - "50051:50051"
       - "9090:9090"
     env_file:
-      - .env
+      - crates/services/control-plane/.env
     restart: unless-stopped
 
   worker:
@@ -19,7 +17,7 @@ services:
       context: .
       dockerfile: crates/services/worker/Dockerfile
     env_file:
-      - .env
+      - crates/services/worker/.env
     restart: unless-stopped
 
   backend:
@@ -27,17 +25,16 @@ services:
     build:
       context: .
       dockerfile: crates/services/server/Dockerfile
+      args:
+        DEEPFILTERNET_VERSION: ${DEEPFILTERNET_VERSION:-0.5.6}
     ports:
       - "4000:4000"
     env_file:
-      - .env
       - crates/services/server/.env
-      - crates/libs/orchestrator/.env
-      - crates/libs/agent/.env
     environment:
-      - SCHEDULER_ENDPOINT=http://scheduler:50051
+      - CONTROL_PLANE_ENDPOINT=http://control-plane:50051
     depends_on:
-      - scheduler
+      - control-plane
     restart: unless-stopped
 
   web:
@@ -51,7 +48,6 @@ services:
     ports:
       - "3000:3000"
     env_file:
-      - .env
       - apps/web/.env.local
     environment:
       - BACKEND_URL=http://backend:4000
