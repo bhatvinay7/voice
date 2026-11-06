@@ -13,16 +13,46 @@ impl SessionActor {
             AgentEvent::ToolRequested {
                 run_id,
                 task_id,
+                query_id,
+                playback_generation,
+                depends_on_query_ids,
                 tool_name,
+                wait_message,
                 args,
             } => {
-                let cfg = config::AppConfig::load()
-                    .unwrap_or_else(|_| config::AppConfig::load_default());
-                if !cfg.tool_wait_tts_prompt.trim().is_empty() {
+                let cfg =
+                    config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
+                // The fast model proposes dependency IDs; the session actor
+                // authorizes only live, prior task branches. This rejects
+                // fabricated IDs, self-dependencies, duplicates, and the one
+                // backwards edge that could form a cycle.
+                let mut validated_dependencies = depends_on_query_ids;
+                validated_dependencies.sort();
+                validated_dependencies.dedup();
+                validated_dependencies.retain(|dependency_id| {
+                    query_id.as_deref() != Some(dependency_id.as_str())
+                        && self.tasks.values().any(|task| {
+                            task.query_id.as_deref() == Some(dependency_id.as_str())
+                                && matches!(task.status, TaskStatus::Running | TaskStatus::Retrying)
+                                && !query_id.as_ref().is_some_and(|current_id| {
+                                    task.required_query_ids.contains(current_id)
+                                })
+                        })
+                });
+                let is_search = tool_name == "search_properties"
+                    || tool_name.to_ascii_lowercase().contains("search")
+                    || tool_name.to_ascii_lowercase().contains("rag");
+                let sts_idle = self.sts_idle.load(std::sync::atomic::Ordering::SeqCst);
+                let wait_message = wait_message
+                    .filter(|message| !message.trim().is_empty())
+                    .unwrap_or_else(|| cfg.tool_wait_tts_prompt.clone());
+                if is_search && sts_idle && !wait_message.trim().is_empty() {
+                    self.sts_idle
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                     if let Some(sts_tx) = &self.sts_tx {
-                        match AssertUnwindSafe(sts_tx.send(crate::models::StsPipelineCmd::InjectContext {
-                            text: cfg.tool_wait_tts_prompt,
-                        }))
+                        match AssertUnwindSafe(sts_tx.send(
+                            crate::models::StsPipelineCmd::InjectFastContext { text: wait_message },
+                        ))
                         .catch_unwind()
                         .await
                         {
@@ -38,51 +68,188 @@ impl SessionActor {
                     run_id: run_id.clone(),
                     tool_name: tool_name.clone(),
                     args: args.clone(),
+                    query_node_id: query_id.as_ref().and_then(|query_id| {
+                        self.conversation_graph
+                            .nodes
+                            .iter()
+                            .find_map(|(node_id, node)| {
+                                (node.event_id == *query_id).then_some(node_id.clone())
+                            })
+                    }),
+                    query_id,
+                    query_graph_version: self.conversation_graph.graph_version,
+                    playback_generation,
+                    dependent_query_ids: Vec::new(),
+                    required_query_ids: validated_dependencies,
+                    completed_output: None,
+                    answer_released: false,
                     status: TaskStatus::Running,
                     attempt: 1,
-                    max_retry: 3,
+                    max_retry: cfg.orchestrator_tool_max_retries,
                     retry_count: 0,
-                    timeout_duration: Duration::from_secs(5),
+                    timeout_duration: Duration::from_millis(cfg.orchestrator_tool_timeout_ms),
                     error: None,
                 };
 
                 self.tasks.insert(task_id.clone(), task_record);
-                self.register_timeout(task_id.clone(), Duration::from_secs(5));
+                if let Some(parent_id) = self
+                    .tasks
+                    .get(&task_id)
+                    .and_then(|task| task.query_node_id.clone())
+                {
+                    let resolved_query = args
+                        .get("query")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(&tool_name);
+                    if self
+                        .conversation_graph
+                        .append_optimized_intent(
+                            format!("Resolved tool intent: {resolved_query}"),
+                            &parent_id,
+                        )
+                        .is_some()
+                    {
+                        self.publish_graph_state().await;
+                    }
+                }
+                if let Some(task) = self.tasks.get(&task_id) {
+                    self.persist_durable_task(
+                        task,
+                        crate::durable_scheduler::DurableTaskStatus::Claimed,
+                        chrono::Utc::now().timestamp_millis(),
+                    );
+                }
+                let cancellation = tokio_util::sync::CancellationToken::new();
+                self.task_cancellations
+                    .insert(task_id.clone(), cancellation.clone());
+                self.register_timeout(
+                    task_id.clone(),
+                    Duration::from_millis(cfg.orchestrator_tool_timeout_ms),
+                );
 
                 let client = self.orch.tool_client.clone();
                 let q_tx = self.orch.queue_tx.clone();
-                let db_local = self.orch.db.clone();
                 let r_id = run_id.0.clone();
                 let t_id = task_id.clone();
                 let t_name = tool_name.clone();
+                let task_query_id = self
+                    .tasks
+                    .get(&task_id)
+                    .and_then(|task| task.query_id.clone());
+                let task_playback_generation = self
+                    .tasks
+                    .get(&task_id)
+                    .map(|task| task.playback_generation)
+                    .unwrap_or(0);
+                let inference_semaphore = self.orch.inference_semaphore.clone();
 
                 tokio::spawn(async move {
-                    execute_tool(client, db_local, q_tx, r_id, t_id, t_name, args, 1).await;
+                    let Ok(_permit) = inference_semaphore.acquire_owned().await else {
+                        return;
+                    };
+                    execute_tool(
+                        client,
+                        q_tx,
+                        r_id,
+                        t_id,
+                        t_name,
+                        args,
+                        1,
+                        task_query_id,
+                        task_playback_generation,
+                        cancellation,
+                    )
+                    .await;
                 });
             }
 
-            AgentEvent::Finished { run_id, result } => {
+            AgentEvent::Finished {
+                run_id,
+                query_id,
+                playback_generation,
+                result,
+                relevance,
+            } => {
+                if self.suppress_agent_response_until_next_user_turn {
+                    tracing::info!(
+                        session = %self.session_id,
+                        "dropping late agent response from interrupted generation"
+                    );
+                    return;
+                }
+                if playback_generation != self.speech_generation_id {
+                    tracing::info!(session = %self.session_id, expected = self.speech_generation_id, received = playback_generation, "dropping agent response from stale playback generation");
+                    return;
+                }
+                if let Some(query_id) = query_id.as_deref() {
+                    let is_current = self
+                        .conversation_graph
+                        .latest_user_node
+                        .as_ref()
+                        .and_then(|node_id| self.conversation_graph.nodes.get(node_id))
+                        .is_some_and(|node| node.event_id == query_id);
+                    if !is_current {
+                        tracing::info!(session = %self.session_id, %query_id, "dropping agent response for superseded user query");
+                        return;
+                    }
+                }
+                let graph_reconstructed = self.pending_graph_response_version.is_some();
+                if let Some(expected_version) = self.pending_graph_response_version.take() {
+                    if expected_version != self.conversation_graph.graph_version {
+                        tracing::info!(session = %self.session_id, expected = expected_version, current = self.conversation_graph.graph_version, "dropping superseded graph response before speech");
+                        self.publish_graph_state().await;
+                        return;
+                    }
+                }
+                if !graph_reconstructed {
+                    let pending = self.conversation_graph.pending_llm_node_ids();
+                    self.conversation_graph.mark_llm_seen(&pending);
+                }
+                if self
+                    .conversation_graph
+                    .append_assistant_response(
+                        result.clone(),
+                        Some(format!("response:{}:{}", run_id.0, playback_generation)),
+                    )
+                    .is_some()
+                {
+                    self.publish_graph_state().await;
+                }
                 if let Some(graph) = &mut self.workflow_graph {
-                    graph.status = "Completed".to_string();
+                    graph.complete();
                 }
 
-                // The agent emitted this response through the session conversation broadcast
-                // before it reported completion. S3 and Redis therefore receive one event.
-
-                if let Some(sts_tx) = &self.sts_tx {
-                    let _ = sts_tx
-                        .send(crate::models::StsPipelineCmd::InjectContext {
-                            text: result.clone(),
-                        })
-                        .await;
+                // The cleaned user turn is appended to Redis immediately after
+                // final STT. Graph reconstruction bypasses the agent actor, so
+                // this is the one place that must publish its assistant reply.
+                if relevance.is_relevant() {
+                    self.pending_user_turn = None;
+                    if graph_reconstructed {
+                        self.publish_conversation_with_relevance(
+                            "LLM_RESPONSE",
+                            serde_json::json!({ "response_text": result, "source": "graph_reconstruction" })
+                                .to_string(),
+                            ConversationRelevance::Relevant,
+                        );
+                    }
+                } else {
+                    // The raw turn remains in S3; suppress a domain fallback
+                    // response from the Redis context window.
+                    self.pending_user_turn = None;
+                    tracing::info!(
+                        session = %self.session_id,
+                        "Irrelevant exchange suppressed from Redis AI history (domain fallback)."
+                    );
                 }
+
+                self.emit_ordered_speech(result.clone()).await;
 
                 let task_id_cache = TaskId(format!("task-db-cache-{}", run_id.0));
                 self.dispatch_db_action(
                     task_id_cache,
                     PendingDbAction::SetJsonWithTtl {
                         key: format!("cache:llm:{}", run_id.call_id()),
-                        payload_json: json!({ "response": result }).to_string(),
+                        payload_json: serde_json::json!({ "response": result }).to_string(),
                         ttl_seconds: 1500,
                     },
                     false,
@@ -92,7 +259,7 @@ impl SessionActor {
 
             AgentEvent::Failed { run_id, error } => {
                 if let Some(graph) = &mut self.workflow_graph {
-                    graph.status = "Failed".to_string();
+                    graph.fail();
                 }
 
                 let fallback_text = "I apologize, but I had trouble processing that request. Please let me know how I can assist you with luxury apartments, viewing slots, or tenancy contracts in the UAE.".to_string();
@@ -117,21 +284,62 @@ impl SessionActor {
 
                 if let Some(sts_tx) = &self.sts_tx {
                     let _ = sts_tx
-                        .send(crate::models::StsPipelineCmd::InjectContext {
+                        .send(crate::models::StsPipelineCmd::InjectFastContext {
                             text: fallback_text,
                         })
                         .await;
                 }
             }
 
-            AgentEvent::NeedsUserInput {
-                run_id: _,
-                question,
-            } => {
+            AgentEvent::NeedsUserInput { run_id, question } => {
+                if self
+                    .conversation_graph
+                    .append_assistant_response(
+                        question.clone(),
+                        Some(format!(
+                            "clarify:{}:{}",
+                            run_id.0, self.speech_generation_id
+                        )),
+                    )
+                    .is_some()
+                {
+                    self.publish_graph_state().await;
+                }
                 if let Some(sts_tx) = &self.sts_tx {
                     let _ = sts_tx
-                        .send(crate::models::StsPipelineCmd::InjectContext { text: question })
+                        .send(crate::models::StsPipelineCmd::InjectFastContext { text: question })
                         .await;
+                }
+            }
+
+            AgentEvent::WaitForRelatedTool {
+                run_id: _,
+                query_id,
+                depends_on_query_id,
+                wait_message,
+            } => {
+                let mut permitted = false;
+                for task in self.tasks.values_mut() {
+                    if task.query_id.as_deref() == Some(depends_on_query_id.as_str())
+                        && matches!(task.status, TaskStatus::Running | TaskStatus::Retrying)
+                    {
+                        if !task.dependent_query_ids.contains(&query_id) {
+                            task.dependent_query_ids.push(query_id.clone());
+                        }
+                        permitted = true;
+                    }
+                }
+                if permitted {
+                    if let (Some(message), Some(sts_tx)) = (wait_message, &self.sts_tx) {
+                        let _ = sts_tx
+                            .send(crate::models::StsPipelineCmd::InjectFastContext {
+                                text: message,
+                            })
+                            .await;
+                    }
+                    tracing::info!(session = %self.session_id, %query_id, %depends_on_query_id, "granted related-query answer permit to pending tool");
+                } else {
+                    tracing::info!(session = %self.session_id, %query_id, %depends_on_query_id, "related tool is no longer pending; planner will re-evaluate on next turn");
                 }
             }
         }
