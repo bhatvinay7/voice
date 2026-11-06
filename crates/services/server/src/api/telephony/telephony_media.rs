@@ -3,10 +3,10 @@ use crate::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use config::TelephonyProvider;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use orchestrator::{phone_media::PhoneOutput, telephony_audio, QueueEvent};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{panic::AssertUnwindSafe, time::Duration};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -36,9 +36,21 @@ pub(super) async fn run(
             stt_state.config.groq_stt_url.clone(),
             stt_state.config.stt_model.clone(),
             stt_state.config.stt_prompt.clone(),
+            stt_state.config.stt_language.clone(),
         );
         while let Some(samples) = utterance_rx.recv().await {
-            if let Some(text) = pipeline.transcribe_chunk(samples).await {
+            let result = AssertUnwindSafe(pipeline.transcribe_chunk(samples))
+                .catch_unwind()
+                .await;
+            let text = match result {
+                Ok(Some(text)) => text,
+                Ok(None) => continue,
+                Err(_) => {
+                    tracing::error!(session = %stt_id, "phone STT task panicked; continuing receiver");
+                    continue;
+                }
+            };
+            {
                 if stt_state
                     .orch_tx
                     .send(QueueEvent::SttTranscript {
@@ -46,6 +58,7 @@ pub(super) async fn run(
                         text,
                         language: "en".into(),
                         is_final: true,
+                        noise: None, // Phone pipeline: noise gate not yet wired here.
                     })
                     .await
                     .is_err()
@@ -76,16 +89,37 @@ pub(super) async fn run(
                     Err(error) => { tracing::debug!(%session_id, %error, "Phone media ended"); break; }
                 };
                 let samples = telephony_audio::resample_mono_pcm(&audio.pcm, audio.sample_rate, 16_000);
-                let speaking = samples.iter().any(|sample| sample.unsigned_abs() >= state.config.vad_barge_in_amplitude);
-                if speaking && !vad.is_speaking() {
+                // Keep telephone input consistent with the browser paths: remove
+                // only configured low-level noise before VAD, STT, recording,
+                // and the interruption signal are fed downstream.
+                let clean_samples: Vec<i16> = samples
+                    .into_iter()
+                    .map(|sample| {
+                        if sample.unsigned_abs() <= state.config.vad_min_speech_amplitude {
+                            0
+                        } else {
+                            sample
+                        }
+                    })
+                    .collect();
+                // Telephone media has no Realtime-provider speech_started
+                // event. Require the configured number of consecutive voiced
+                // frames before clearing output so a single click, DTMF leak,
+                // or line transient cannot barge in.
+                let confirmed_speech = vad.observe_barge_in(
+                    &clean_samples,
+                    state.config.vad_barge_in_amplitude,
+                    state.config.vad_barge_in_min_chunks,
+                );
+                if confirmed_speech && !vad.is_speaking() {
                     while outbound.try_recv().is_ok() {}
                     if send(&mut writer, protocol.clear_message()).await.is_err() { break; }
                     if enqueue(&state, QueueEvent::BargeInTrigger { session_id: session_id.clone(), timestamp_ms: chrono::Utc::now().timestamp_millis() as u64 }).await.is_err() { break; }
                 }
-                let utterance = vad.push(&samples, state.config.vad_min_speech_amplitude, state.config.vad_end_of_speech_timeout_ms);
-                let count = samples.len() as u64;
+                let utterance = vad.push(&clean_samples, state.config.vad_min_speech_amplitude, state.config.vad_end_of_speech_timeout_ms);
+                let count = clean_samples.len() as u64;
                 if enqueue(&state, QueueEvent::TelephonyAudio {
-                    session_id: session_id.clone(), samples, sample_rate: 16_000, channels: 1, elapsed_samples,
+                    session_id: session_id.clone(), samples: clean_samples, sample_rate: 16_000, channels: 1, elapsed_samples,
                 }).await.is_err() { break; }
                 elapsed_samples = elapsed_samples.saturating_add(count);
                 if let Some(utterance) = utterance {
@@ -375,6 +409,7 @@ fn decode_pcm(bytes: &[u8]) -> Result<Vec<i16>, &'static str> {
 struct PhoneVad {
     silence_samples: usize,
     samples: Vec<i16>,
+    barge_in_chunks: u32,
 }
 impl PhoneVad {
     fn is_speaking(&self) -> bool {
@@ -402,6 +437,18 @@ impl PhoneVad {
         } else {
             None
         }
+    }
+
+    fn observe_barge_in(&mut self, samples: &[i16], amplitude: u16, min_chunks: u32) -> bool {
+        let voiced = samples
+            .iter()
+            .any(|sample| sample.unsigned_abs() >= amplitude);
+        if voiced {
+            self.barge_in_chunks = self.barge_in_chunks.saturating_add(1);
+        } else {
+            self.barge_in_chunks = 0;
+        }
+        self.barge_in_chunks >= min_chunks.max(1)
     }
 }
 

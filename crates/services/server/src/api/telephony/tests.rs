@@ -29,7 +29,11 @@ pub(super) fn state(provider: TelephonyProvider) -> (AppState, mpsc::Receiver<Qu
     let (orch_tx, rx) = mpsc::channel(100);
     (
         AppState {
-            slots: orchestrator::slots::Slots::new(&sled::Config::new().temporary(true).open().unwrap(), 20).unwrap(),
+            slots: orchestrator::slots::Slots::new(
+                &sled::Config::new().temporary(true).open().unwrap(),
+                20,
+            )
+            .unwrap(),
             db: db.clone(),
             orch_tx,
             config,
@@ -369,10 +373,13 @@ async fn phone_admission_rejects_full_cell_without_leaking_media_reservation() {
     headers.insert("content-type", "application/json".parse().unwrap());
     headers.insert("authorization", "Bearer media-test-secret".parse().unwrap());
     let response = inbound_handler(
-        Path("custom".into()), State(state.clone()),
-        OriginalUri(Uri::from_static("/api/telephony/custom/incoming")), headers,
+        Path("custom".into()),
+        State(state.clone()),
+        OriginalUri(Uri::from_static("/api/telephony/custom/incoming")),
+        headers,
         Bytes::from_static(br#"{"call_id":"overflow","event":"start"}"#),
-    ).await;
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(queue.try_recv().is_err());
     assert!(state.phone_media.sender("phone:custom:overflow").is_none());
