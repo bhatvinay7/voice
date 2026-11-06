@@ -15,7 +15,37 @@ const PCM_BYTES_PER_FRAME: usize = PCM_SAMPLES_PER_FRAME * 2;
 
 pub enum TtsPlaybackResult {
     Completed,
-    Interrupted,
+    Interrupted(PlaybackClear),
+}
+
+/// A playback-generation change. Fast planner speech only invalidates queued
+/// main-agent audio; a barge-in invalidates both sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackClear {
+    AgentOnly,
+    All,
+}
+
+/// Monotonic session-local playback token. A source may enqueue audio only for
+/// the current generation; preemption makes every older queued request stale.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PlaybackGenerationGate {
+    current: u64,
+}
+
+impl PlaybackGenerationGate {
+    pub fn current(self) -> u64 {
+        self.current
+    }
+
+    pub fn preempt(&mut self) -> u64 {
+        self.current = self.current.saturating_add(1);
+        self.current
+    }
+
+    pub fn accepts(self, generation: u64) -> bool {
+        generation >= self.current
+    }
 }
 
 struct SpeakingGuard(Arc<AtomicBool>);
@@ -30,8 +60,7 @@ pub async fn play_tts_stream(
     pipeline: &TtsPipeline,
     text: &str,
     audio_source: &NativeAudioSource,
-    clear_rx: &mut mpsc::Receiver<()>,
-    tts_rx: &mut mpsc::Receiver<String>,
+    clear_rx: &mut mpsc::Receiver<PlaybackClear>,
     ai_is_speaking: &Arc<AtomicBool>,
     recording_tx: &mpsc::Sender<S3DumpData>,
     session_id: &str,
@@ -40,9 +69,9 @@ pub async fn play_tts_stream(
     let request_started_at = Instant::now();
     let response = tokio::select! {
         clear = clear_rx.recv() => {
-            if clear.is_some() {
-                clear_playback(audio_source, tts_rx);
-                return Ok(TtsPlaybackResult::Interrupted);
+            if let Some(clear) = clear {
+                clear_playback(audio_source);
+                return Ok(TtsPlaybackResult::Interrupted(clear));
             }
             return Err("TTS interrupt channel closed".to_string());
         }
@@ -60,7 +89,6 @@ pub async fn play_tts_stream(
         response,
         audio_source,
         clear_rx,
-        tts_rx,
         recording_tx,
         session_id,
         recording_started_at,
@@ -77,8 +105,7 @@ pub async fn play_tts_stream(
 async fn stream_response(
     response: reqwest::Response,
     audio_source: &NativeAudioSource,
-    clear_rx: &mut mpsc::Receiver<()>,
-    tts_rx: &mut mpsc::Receiver<String>,
+    clear_rx: &mut mpsc::Receiver<PlaybackClear>,
     recording_tx: &mpsc::Sender<S3DumpData>,
     session_id: &str,
     recording_started_at: Instant,
@@ -92,9 +119,9 @@ async fn stream_response(
     loop {
         let next_chunk = tokio::select! {
             clear = clear_rx.recv() => {
-                if clear.is_some() {
-                    clear_playback(audio_source, tts_rx);
-                    return Ok(TtsPlaybackResult::Interrupted);
+                if let Some(clear) = clear {
+                    clear_playback(audio_source);
+                    return Ok(TtsPlaybackResult::Interrupted(clear));
                 }
                 return Err("TTS interrupt channel closed".to_string());
             }
@@ -108,9 +135,9 @@ async fn stream_response(
         pending_bytes.extend(chunk);
 
         while pending_bytes.len() >= PCM_BYTES_PER_FRAME {
-            if clear_rx.try_recv().is_ok() {
-                clear_playback(audio_source, tts_rx);
-                return Ok(TtsPlaybackResult::Interrupted);
+            if let Ok(clear) = clear_rx.try_recv() {
+                clear_playback(audio_source);
+                return Ok(TtsPlaybackResult::Interrupted(clear));
             }
             let frame_bytes: Vec<u8> = pending_bytes.drain(..PCM_BYTES_PER_FRAME).collect();
             play_pcm_frame(
@@ -202,7 +229,6 @@ async fn play_pcm_frame(
         .map_err(|error| format!("LiveKit rejected a TTS audio frame: {}", error))
 }
 
-fn clear_playback(audio_source: &NativeAudioSource, tts_rx: &mut mpsc::Receiver<String>) {
-    while tts_rx.try_recv().is_ok() {}
+fn clear_playback(audio_source: &NativeAudioSource) {
     audio_source.clear_buffer();
 }
