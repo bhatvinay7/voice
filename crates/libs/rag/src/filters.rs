@@ -13,7 +13,10 @@ pub struct SearchQueryFilters {
 }
 
 /// Dynamically parses natural language queries into structured search filters.
-pub async fn parse_query_to_filters(db: &DatabaseStore, query: &str) -> Result<SearchQueryFilters, String> {
+pub async fn parse_query_to_filters(
+    db: &DatabaseStore,
+    query: &str,
+) -> Result<SearchQueryFilters, String> {
     let lower = query.to_lowercase();
     let mut filters = SearchQueryFilters::default();
     let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());

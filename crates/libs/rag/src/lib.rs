@@ -66,8 +66,10 @@ impl RAGPipeline {
     pub fn new(db: DatabaseStore) -> Self {
         let cfg = config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
         let rewrite_tx = spawn_query_rewriter(
-            cfg.fast_model_endpoint_url.clone(), cfg.fast_model_api_key.clone(),
-            cfg.fast_model.clone(), cfg.rag_business_keywords.clone(),
+            cfg.fast_model_endpoint_url.clone(),
+            cfg.fast_model_api_key.clone(),
+            cfg.fast_model.clone(),
+            cfg.rag_business_keywords.clone(),
         );
         Self {
             db,
@@ -86,8 +88,10 @@ impl RAGPipeline {
             upstash_url,
             upstash_token,
             rewrite_tx: spawn_query_rewriter(
-                cfg.fast_model_endpoint_url, cfg.fast_model_api_key,
-                cfg.fast_model, cfg.rag_business_keywords,
+                cfg.fast_model_endpoint_url,
+                cfg.fast_model_api_key,
+                cfg.fast_model,
+                cfg.rag_business_keywords,
             ),
         }
     }
@@ -96,11 +100,21 @@ impl RAGPipeline {
     /// panic, or a timeout always falls back to the exact user query.
     pub async fn rewrite_query(&self, query: &str) -> String {
         let (response_tx, response_rx) = oneshot::channel();
-        if self.rewrite_tx.send(RewriteRequest { query: query.to_string(), response: response_tx }).await.is_err() {
+        if self
+            .rewrite_tx
+            .send(RewriteRequest {
+                query: query.to_string(),
+                response: response_tx,
+            })
+            .await
+            .is_err()
+        {
             return query.to_string();
         }
         tokio::time::timeout(Duration::from_secs(3), response_rx)
-            .await.ok().and_then(Result::ok)
+            .await
+            .ok()
+            .and_then(Result::ok)
             .filter(|rewritten| !rewritten.trim().is_empty())
             .unwrap_or_else(|| query.to_string())
     }
@@ -235,7 +249,10 @@ impl RAGPipeline {
 
     /// Dynamically searches knowledge documents for UAE real estate purchase procedures,
     /// DLD laws, Golden Visa regulations, fee schedules, and conveyancing rules.
-    pub async fn search_knowledge(&self, query: &str) -> Result<Vec<KnowledgeSearchResult>, String> {
+    pub async fn search_knowledge(
+        &self,
+        query: &str,
+    ) -> Result<Vec<KnowledgeSearchResult>, String> {
         let query = self.rewrite_query(query).await;
         let q_lower = query.to_lowercase();
         let query_tokens: Vec<&str> = q_lower
@@ -318,7 +335,8 @@ impl RAGPipeline {
             .header("Authorization", format!("Bearer {}", self.upstash_token))
             .json(&payload)
             .send()
-            .await.map_err(|e| e.to_string())?;
+            .await
+            .map_err(|e| e.to_string())?;
 
         if !resp.status().is_success() {
             return self.search_local(query).await;
@@ -442,7 +460,14 @@ fn spawn_query_rewriter(
                 let original = request.query.clone();
                 let model_query = original.clone();
                 let completion = tokio::spawn(async move {
-                    rewrite_with_fast_model(endpoint, api_key, model, business_keywords, model_query).await
+                    rewrite_with_fast_model(
+                        endpoint,
+                        api_key,
+                        model,
+                        business_keywords,
+                        model_query,
+                    )
+                    .await
                 });
                 let rewritten = match completion.await {
                     Ok(Ok(value)) if !value.trim().is_empty() => value,
@@ -451,7 +476,9 @@ fn spawn_query_rewriter(
                         original
                     }
                     Err(error) => {
-                        tracing::warn!("RAG fast query rewrite task panicked or was cancelled: {error}");
+                        tracing::warn!(
+                            "RAG fast query rewrite task panicked or was cancelled: {error}"
+                        );
                         original
                     }
                     _ => original,
@@ -488,12 +515,18 @@ async fn rewrite_with_fast_model(
         .bearer_auth(api_key)
         .json(&body)
         .timeout(Duration::from_secs(3))
-        .send().await.map_err(|error| error.to_string())?;
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
     if !response.status().is_success() {
         return Err(format!("fast model returned {}", response.status()));
     }
-    response.json::<serde_json::Value>().await.map_err(|error| error.to_string())?
-        .pointer("/choices/0/message/content").and_then(|value| value.as_str())
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| error.to_string())?
+        .pointer("/choices/0/message/content")
+        .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "fast model response did not contain a query".to_string())
