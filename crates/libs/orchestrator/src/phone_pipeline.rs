@@ -25,19 +25,43 @@ pub fn spawn(
             cfg.tts_voice,
         );
         let started_at = Instant::now();
-        let mut pending = VecDeque::new();
+        // Phone calls need the same physical source isolation as WebRTC: a
+        // fast clarification/wait prompt must never sit behind a large-agent
+        // answer in a shared FIFO queue.
+        let mut agent_pending: VecDeque<(u64, String)> = VecDeque::new();
+        let mut fast_pending: VecDeque<(u64, String)> = VecDeque::new();
+        let mut playback_generation = 0_u64;
         if let Ok(greeting) = std::env::var("AI_GREETING") {
             if !greeting.trim().is_empty() {
-                pending.push_back(greeting);
+                agent_pending.push_back((playback_generation, greeting));
             }
         }
         'session: loop {
-            let text = if let Some(text) = pending.pop_front() {
-                text
+            let (generation, text) = if let Some(request) = fast_pending.pop_front() {
+                request
+            } else if let Some(request) = agent_pending.pop_front() {
+                request
             } else {
                 match rx.recv().await {
-                    Some(StsPipelineCmd::InjectContext { text }) => text,
+                    Some(StsPipelineCmd::InjectContext { text })
+                    | Some(StsPipelineCmd::InjectAgentContext { text }) => {
+                        agent_pending.push_back((playback_generation, text));
+                        continue;
+                    }
+                    Some(StsPipelineCmd::InjectFastContext { text }) => {
+                        playback_generation = playback_generation.saturating_add(1);
+                        agent_pending.clear();
+                        fast_pending.clear();
+                        if output.send(PhoneOutput::Clear).await.is_err() {
+                            break;
+                        }
+                        fast_pending.push_back((playback_generation, text));
+                        continue;
+                    }
                     Some(StsPipelineCmd::Stop) => {
+                        playback_generation = playback_generation.saturating_add(1);
+                        agent_pending.clear();
+                        fast_pending.clear();
                         if output.send(PhoneOutput::Clear).await.is_err() {
                             break;
                         }
@@ -60,12 +84,23 @@ pub fn spawn(
                 tokio::select! {
                     biased;
                     command = rx.recv() => match command {
-                        Some(StsPipelineCmd::InjectContext { text }) => {
-                            if pending.len() < 50 { pending.push_back(text); }
+                        Some(StsPipelineCmd::InjectContext { text })
+                        | Some(StsPipelineCmd::InjectAgentContext { text }) => {
+                            if agent_pending.len() < 50 { agent_pending.push_back((playback_generation, text)); }
                             else { let _ = events.send(StsPipelineEvent::Error("Phone speech queue is full".into())).await; }
                         }
+                        Some(StsPipelineCmd::InjectFastContext { text }) => {
+                            playback_generation = playback_generation.saturating_add(1);
+                            agent_pending.clear();
+                            fast_pending.clear();
+                            if output.send(PhoneOutput::Clear).await.is_err() { break 'session; }
+                            fast_pending.push_back((playback_generation, text));
+                            break;
+                        }
                         Some(StsPipelineCmd::Stop) => {
-                            pending.clear();
+                            playback_generation = playback_generation.saturating_add(1);
+                            agent_pending.clear();
+                            fast_pending.clear();
                             if output.send(PhoneOutput::Clear).await.is_err() { break 'session; }
                             break; // Dropping the speech future cancels its HTTP stream.
                         }
@@ -81,6 +116,11 @@ pub fn spawn(
                         break;
                     }
                 }
+            }
+            // A preemption observed while this request was awaiting TTS
+            // completion invalidates it before the next queue selection.
+            if generation != playback_generation {
+                continue;
             }
         }
     });

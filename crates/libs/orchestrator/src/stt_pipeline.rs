@@ -1,3 +1,4 @@
+use crate::noise_suppression::DeepFilterNetProcessor;
 use futures_util::FutureExt;
 use reqwest::{multipart, Client};
 use std::panic::AssertUnwindSafe;
@@ -10,6 +11,8 @@ pub struct SttAudioChunk {
     pub sample_rate: u32,
     pub channels: u16,
     pub model_override: Option<String>,
+    /// Noise classification computed by the VAD analysis window.
+    pub noise: crate::audio_gate::NoiseProfile,
 }
 
 pub struct SttPipeline {
@@ -18,6 +21,10 @@ pub struct SttPipeline {
     endpoint_url: String,
     model: String,
     prompt: String,
+    /// BCP-47 language code forwarded to the Whisper API.
+    /// Empty = Whisper auto-detects the language.
+    language: String,
+    noise_suppression: DeepFilterNetProcessor,
 }
 
 impl SttPipeline {
@@ -27,6 +34,7 @@ impl SttPipeline {
             endpoint_url,
             "whisper-large-v3".to_string(),
             std::env::var("STT_PROMPT").unwrap_or_default(),
+            std::env::var("STT_LANGUAGE").unwrap_or_else(|_| "en".to_string()),
         )
     }
 
@@ -35,6 +43,7 @@ impl SttPipeline {
         endpoint_url: String,
         model: String,
         prompt: String,
+        language: String,
     ) -> Self {
         Self {
             client: Client::new(),
@@ -42,6 +51,8 @@ impl SttPipeline {
             endpoint_url,
             model,
             prompt,
+            language,
+            noise_suppression: DeepFilterNetProcessor::from_env(),
         }
     }
 
@@ -64,6 +75,11 @@ impl SttPipeline {
             return None;
         }
 
+        let enhanced_pcm = self
+            .noise_suppression
+            .process(pcm_data, sample_rate, channels)
+            .await;
+        let pcm_data = enhanced_pcm.as_slice();
         let active_model = model_override.unwrap_or(&self.model);
         info!(
             "STT: Transcribing audio chunk of {} samples ({}Hz, {}ch) via STT model '{}'",
@@ -81,11 +97,16 @@ impl SttPipeline {
             .mime_str("audio/wav")
             .unwrap();
 
-        let form = multipart::Form::new()
+        let mut form = multipart::Form::new()
             .part("file", part)
             .text("model", active_model.to_string())
-            .text("language", "en")
             .text("prompt", self.prompt.clone());
+
+        // Only send the language parameter when one is configured; omitting it
+        // lets Whisper auto-detect the speaker's language.
+        if !self.language.is_empty() {
+            form = form.text("language", self.language.clone());
+        }
 
         let response = self
             .client
@@ -184,7 +205,7 @@ impl SttPipeline {
         self: Arc<Self>,
         call_id: String,
         buffer_capacity: usize,
-        result_tx: mpsc::Sender<String>,
+        result_tx: mpsc::Sender<(String, crate::audio_gate::NoiseProfile)>,
     ) -> mpsc::Sender<SttAudioChunk> {
         let (audio_tx, mut audio_rx) = mpsc::channel::<SttAudioChunk>(buffer_capacity);
         let self_clone = self.clone();
@@ -209,6 +230,7 @@ impl SttPipeline {
                         let call_id_request = call_id_for_loop.clone();
 
                         // Process chunks sequentially to guarantee strict chronological order of speech
+                        let noise_profile = chunk.noise.clone();
                         let req_res = AssertUnwindSafe(async move {
                             self_request
                                 .transcribe_chunk_custom(
@@ -230,7 +252,7 @@ impl SttPipeline {
                                     transcription_started_at.elapsed().as_millis(),
                                     text.chars().count()
                                 );
-                                let _ = result_tx_request.send(text).await;
+                                let _ = result_tx_request.send((text, noise_profile)).await;
                             }
                             Ok(None) => {
                                 warn!(
@@ -277,7 +299,7 @@ impl SttPipeline {
     pub fn spawn_audio_stream_worker(
         self: Arc<Self>,
         buffer_capacity: usize,
-        result_tx: mpsc::Sender<String>,
+        result_tx: mpsc::Sender<(String, crate::audio_gate::NoiseProfile)>,
     ) -> mpsc::Sender<SttAudioChunk> {
         self.spawn_call_audio_worker("default-call".to_string(), buffer_capacity, result_tx)
     }
@@ -400,17 +422,28 @@ mod tests {
         assert!(!audio_tx_call1.is_closed());
         assert!(!audio_tx_call2.is_closed());
 
+        let default_noise = crate::audio_gate::NoiseProfile {
+            speech_ratio: 1.0,
+            loud_noise_ratio: 0.0,
+            clipped_ratio: 0.0,
+            sustained_tone: false,
+            impulsive: false,
+            level: crate::audio_gate::NoiseLevel::Clean,
+        };
+
         let chunk1 = SttAudioChunk {
             pcm_data: vec![0i16; 1600],
             sample_rate: 16000,
             channels: 1,
             model_override: None,
+            noise: default_noise.clone(),
         };
         let chunk2 = SttAudioChunk {
             pcm_data: vec![0i16; 1600],
             sample_rate: 16000,
             channels: 1,
             model_override: None,
+            noise: default_noise,
         };
 
         assert!(audio_tx_call1.send(chunk1).await.is_ok());
