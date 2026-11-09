@@ -1,5 +1,6 @@
 const path = require('path');
-const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:4000';
+const API_URL = process.env.API_URL || process.env.BACKEND_URL || 'http://127.0.0.1:4000';
+const VOICE_SERVER_URL = process.env.VOICE_SERVER_URL || process.env.VOICE_BACKEND_URL || 'http://127.0.0.1:4001';
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -8,12 +9,20 @@ const nextConfig = {
   async rewrites() {
     return [
       {
-        source: '/api/:path*',
-        destination: `${BACKEND_URL}/api/:path*`,
+        source: '/api/calls/:path*',
+        destination: `${VOICE_SERVER_URL}/api/calls/:path*`,
       },
       {
         source: '/ws',
-        destination: `${BACKEND_URL}/ws`,
+        destination: `${VOICE_SERVER_URL}/ws`,
+      },
+      {
+        source: '/api/telephony/:path*',
+        destination: `${VOICE_SERVER_URL}/api/telephony/:path*`,
+      },
+      {
+        source: '/api/:path*',
+        destination: `${API_URL}/api/:path*`,
       },
     ];
   },

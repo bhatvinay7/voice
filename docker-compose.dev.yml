@@ -20,8 +20,8 @@ services:
       - crates/services/worker/.env
     restart: unless-stopped
 
-  backend:
-    image: ${REGISTRY:-docker.io/myrepo}/real-estate-backend:${TAG:-latest}
+  api:
+    image: ${REGISTRY:-docker.io/myrepo}/real-estate-api:${TAG:-latest}
     build:
       context: .
       dockerfile: crates/services/server/Dockerfile
@@ -32,6 +32,29 @@ services:
     env_file:
       - crates/services/server/.env
     environment:
+      - SERVICE_MODE=api
+      - API_PORT=4000
+    depends_on:
+      - control-plane
+    restart: unless-stopped
+
+  voice-server:
+    image: ${REGISTRY:-docker.io/myrepo}/real-estate-voice-server:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: crates/services/server/Dockerfile
+      args:
+        DEEPFILTERNET_VERSION: ${DEEPFILTERNET_VERSION:-0.5.6}
+    ports:
+      - "4001:4001"
+    env_file:
+      - crates/services/server/.env
+    volumes:
+      - ${SHERPA_MODEL_DIR:-./models/sherpa}:/models/sherpa:ro
+    environment:
+      - SERVICE_MODE=voice
+      - PORT=4001
+      - API_PORT=4001
       - CONTROL_PLANE_ENDPOINT=http://control-plane:50051
     depends_on:
       - control-plane
@@ -45,12 +68,18 @@ services:
       args:
         NEXT_PUBLIC_LIVEKIT_URL: ${LIVEKIT_URL:-wss://estate-12gbyba5.livekit.cloud}
         NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+        API_URL: http://api:4000
+        BACKEND_URL: http://api:4000
+        VOICE_SERVER_URL: http://voice-server:4001
     ports:
       - "3000:3000"
     env_file:
       - apps/web/.env.local
     environment:
-      - BACKEND_URL=http://backend:4000
+      - API_URL=http://api:4000
+      - BACKEND_URL=http://api:4000
+      - VOICE_SERVER_URL=http://voice-server:4001
     depends_on:
-      - backend
+      - api
+      - voice-server
     restart: unless-stopped
