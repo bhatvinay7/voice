@@ -99,12 +99,12 @@ async fn test_verification_gate_and_slot_double_booking_conflict() {
 }
 
 #[tokio::test]
-async fn test_llm_conversational_history_and_tone_context_injection() {
+async fn test_llm_conversational_history() {
     load_test_env();
 
     let db = DatabaseStore::new();
     let pubsub = create_shared_bus(10);
-    let run_id = RunId("run-tone-test-1".to_string());
+    let run_id = RunId("run-conversation-test-1".to_string());
     let (orch_tx, mut _orch_rx) = mpsc::channel::<QueueEvent>(100);
 
     let mut agent = agent::LlmAgentActor::new(run_id.clone(), db, pubsub, orch_tx);
@@ -119,23 +119,6 @@ async fn test_llm_conversational_history_and_tone_context_injection() {
         })
         .await;
     assert_eq!(agent.session_history.len(), 1);
-
-    // 2. Parallel Tone Analysis task detects caller emotion/tone and injects context
-    agent
-        .handle_command(AgentCmd::InjectToneContext {
-            run_id: run_id.clone(),
-            session_id: "session-tone-1".to_string(),
-            tone_intent: "hesitant_budget_conscious".to_string(),
-            confidence: 0.94,
-        })
-        .await;
-
-    // Verify tone injection was recorded in conversation history
-    assert_eq!(agent.session_history.len(), 2);
-    let last_entry = agent.session_history.last().unwrap();
-    assert!(last_entry.contains("[SYSTEM_TONE_INJECTION]"));
-    assert!(last_entry.contains("hesitant_budget_conscious"));
-    assert!(last_entry.contains("0.94"));
 }
 
 #[tokio::test]

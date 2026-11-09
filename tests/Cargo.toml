@@ -3,6 +3,7 @@ name = "integration-tests"
 version = "0.1.0"
 edition = "2021"
 publish = false
+autotests = false
 
 [dependencies]
 tokio = { workspace = true }
@@ -29,4 +30,58 @@ tokio-tungstenite = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 chrono = { workspace = true }
 
+[[test]]
+name = "control_plane_tests"
+path = "control_plane_tests.rs"
 
+[[test]]
+name = "durable_scheduler_tests"
+path = "durable_scheduler_tests.rs"
+
+[[test]]
+name = "graph_context_tests"
+path = "graph_context_tests.rs"
+
+[[test]]
+name = "infra_tests"
+path = "infra_tests.rs"
+
+[[test]]
+name = "livekit_tests"
+path = "livekit_tests.rs"
+
+[[test]]
+name = "llm_tests"
+path = "llm_tests.rs"
+
+[[test]]
+name = "model_verification_tests"
+path = "model_verification_tests.rs"
+
+[[test]]
+name = "orchestration_contract_tests"
+path = "orchestration_contract_tests.rs"
+
+[[test]]
+name = "orchestrator_call_ended_tests"
+path = "orchestrator_call_ended_tests.rs"
+
+[[test]]
+name = "orchestrator_live_tests"
+path = "orchestrator_live_tests.rs"
+
+[[test]]
+name = "orchestrator_tests"
+path = "orchestrator_tests.rs"
+
+[[test]]
+name = "vad_tests"
+path = "vad_tests.rs"
+
+[[test]]
+name = "voice_multiturn_tests"
+path = "voice_multiturn_tests.rs"
+
+[[test]]
+name = "webrtc_rbac_tests"
+path = "webrtc_rbac_tests.rs"
