@@ -37,7 +37,6 @@ pub struct AppConfig {
     pub r2_access_key_id: String,
     pub r2_secret_access_key: String,
     pub r2_endpoint_url: String,
-    pub tone_model_api_key: String,
     pub upstash_vector_rest_url: String,
     pub upstash_vector_rest_token: String,
     pub node_env: String,
@@ -89,6 +88,9 @@ pub struct AppConfig {
     /// Response-model prompt used after a tool result has been attached to
     /// the originating graph branch.
     pub agent_tool_result_prompt_template: String,
+    /// Main-agent evaluator prompt used to decide whether fetched data
+    /// answers the exact question or requires a refined tool query.
+    pub agent_tool_evaluator_prompt_template: String,
     /// Compact event-specific instruction for asynchronous graph enrichment.
     pub agent_graph_enrichment_prompt_template: String,
     /// Brief speech queued while a tool request is running; empty disables it.
@@ -503,7 +505,6 @@ impl AppConfig {
             r2_access_key_id: env::var("R2_ACCESS_KEY_ID").unwrap_or_default(),
             r2_secret_access_key: env::var("R2_SECRET_ACCESS_KEY").unwrap_or_default(),
             r2_endpoint_url: env::var("R2_ENDPOINT_URL").unwrap_or_default(),
-            tone_model_api_key: env::var("TONE_MODEL_API_KEY").unwrap_or_default(),
             upstash_vector_rest_url: env::var("UPSTASH_VECTOR_REST_URL")
                 .or_else(|_| env::var("UPSTASH_VECTOR_URL"))
                 .unwrap_or_default(),
@@ -611,6 +612,8 @@ impl AppConfig {
             .unwrap_or_default(),
             agent_tool_result_prompt_template: env::var("AGENT_TOOL_RESULT_PROMPT_TEMPLATE")
                 .unwrap_or_default(),
+            agent_tool_evaluator_prompt_template: env::var("AGENT_TOOL_EVALUATOR_PROMPT_TEMPLATE")
+                .unwrap_or_default(),
             agent_graph_enrichment_prompt_template: env::var(
                 "AGENT_GRAPH_ENRICHMENT_PROMPT_TEMPLATE",
             )
@@ -686,7 +689,7 @@ impl AppConfig {
             sts_text_jitter_ms: env::var("STS_TEXT_JITTER_MS")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(120),
+                .unwrap_or(800),
             sts_text_max_wait_ms: env::var("STS_TEXT_MAX_WAIT_MS")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -801,47 +804,5 @@ fn disabled_telephony_config() -> TelephonyConfig {
 }
 
 #[cfg(test)]
-mod environment_tests {
-    #[test]
-    fn missing_credentials_and_context_are_empty() {
-        const CHILD: &str = "ESTATE_EMPTY_CONFIG_TEST_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
-                .env_clear()
-                .env(CHILD, "1")
-                .current_dir(std::env::temp_dir())
-                .args([
-                    "--exact",
-                    "environment_tests::missing_credentials_and_context_are_empty",
-                    "--nocapture",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-            return;
-        }
-        let cfg = super::AppConfig::load().unwrap();
-        for value in [
-            cfg.jwt_secret,
-            cfg.postgres_url,
-            cfg.redis_url,
-            cfg.llm_api_key,
-            cfg.llm_model,
-            cfg.agent_system_prompt,
-            cfg.domain_fallback_message,
-            cfg.r2_endpoint_url,
-            cfg.app_domain_name,
-        ] {
-            assert!(
-                value.is_empty(),
-                "Missing values must not acquire hardcoded defaults"
-            );
-        }
-        assert!(cfg.action_booking_keywords.is_empty());
-        assert!(cfg.filter_type_a_synonyms.is_empty());
-    }
-}
+#[path = "../../../../tests/config_config_lib_environment_tests_1.rs"]
+mod environment_tests;

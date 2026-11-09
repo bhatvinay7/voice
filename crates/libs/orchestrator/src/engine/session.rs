@@ -1,5 +1,6 @@
 use super::orchestrator::Orchestrator;
 use crate::models::*;
+use dashmap::DashMap;
 use futures_util::FutureExt;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -20,12 +21,15 @@ pub struct SessionActor {
     /// It stores user text, optimized intent, tool context, and responses for
     /// the secondary response/reconstruction path.
     pub conversation_graph: workflow::ConversationGraph,
+    /// Session-local, graph-worker-owned index. Agent reads are served as
+    /// lightweight references and then resolve exact nodes from this actor's
+    /// conversation graph. Agent commands never receive mutation capability.
+    pub graph_node_references: DashMap<String, workflow::ConversationNodeReference>,
     pub agent_tx: Option<mpsc::Sender<AgentCmd>>,
     pub sts_tx: Option<mpsc::Sender<StsPipelineCmd>>,
     pub s3_dump_tx: Option<mpsc::Sender<S3DumpData>>,
     pub conversation_tx: tokio::sync::broadcast::Sender<ConversationEvent>,
     pub tts_audio_tx: Option<mpsc::Sender<TtsAudioPacket>>,
-    pub audio_broadcast_tx: tokio::sync::broadcast::Sender<(String, Vec<u8>)>,
     pub ai_listen_muted: bool,
     pub last_user_transcript: Option<(String, std::time::Instant)>,
     pub cancel_token: CancellationToken,
@@ -49,12 +53,34 @@ pub struct SessionActor {
     pub pending_query_clean: Option<String>,
     pub pending_query_noise: Option<crate::audio_gate::NoiseProfile>,
     pub pending_query_started_at: Option<std::time::Instant>,
+    /// Last non-final ASR update. The fast planner is held until this stream
+    /// has been quiet for the configured debounce interval.
+    pub last_sts_partial_at: Option<std::time::Instant>,
     /// Version accepted by the graph reconciler for the next response event.
     /// The mailbox re-checks it before speech so a newer tool update wins.
     pub pending_graph_response_version: Option<u64>,
+    /// Completed main-agent output held while the caller has the floor.
+    pub deferred_agent_response: Option<DeferredAgentResponse>,
+    /// Graph response node whose audio is currently being emitted through STS.
+    pub active_speech_response_node_id: Option<String>,
+    pub active_speech_query_node_id: Option<String>,
+    /// Interruption awaiting transcript confirmation or a false-positive verdict.
+    pub pending_interruption_generation_id: Option<u64>,
+    /// False-positive verification already scheduled for this interruption.
+    pub interruption_verification_generation_id: Option<u64>,
+    /// Verification reached its retry limit while speech was active; resume
+    /// checking only after a later caller-silence event.
+    pub interruption_verification_waiting_generation_id: Option<u64>,
     /// A confirmed barge-in revokes the pending assistant completion. It is
     /// reset only after the next accepted user turn begins planning.
     pub suppress_agent_response_until_next_user_turn: bool,
+    /// Session-local LLM speaker priority flags. User speech promotes the
+    /// fast planner and immediately revokes main-agent output permission.
+    pub fast_llm_active: bool,
+    pub main_llm_active: bool,
+    /// True while VAD/STT has detected caller speech. This is persisted so a
+    /// late main-model completion cannot send audio during a barge-in.
+    pub user_speaking: bool,
     /// Latest graph revision dispatched to the reconstruction loop. Sled's
     /// recovery watcher may repeat the same write, so the live actor dedupes it.
     pub last_graph_request_version: u64,
@@ -140,48 +166,6 @@ impl SessionActor {
             crate::supervisors::run_tts_audio_packet_pipeline(tts_session_id, tts_audio_rx).await;
         });
 
-        let (audio_broadcast_tx, mut tone_rx) =
-            tokio::sync::broadcast::channel::<(String, Vec<u8>)>(100);
-        let agent_tx_clone = agent_tx.clone();
-        let r_id = run_id.clone();
-
-        tokio::spawn(async move {
-            let mut chunk_count = 0;
-            let cfg =
-                config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
-            let tone_api_key = cfg.tone_model_api_key.clone();
-
-            while let Ok((sess_id, _audio_chunk)) = tone_rx.recv().await {
-                chunk_count += 1;
-                if chunk_count % 5 == 0 {
-                    let agent_tx_inner = agent_tx_clone.clone();
-                    let rid_inner = r_id.clone();
-                    let _api_key = tone_api_key.clone();
-                    let s_id = sess_id.clone();
-
-                    tokio::spawn(async move {
-                        let fut = std::panic::AssertUnwindSafe(async {
-                            let _ = agent_tx_inner
-                                .send(AgentCmd::InjectToneContext {
-                                    run_id: rid_inner.clone(),
-                                    session_id: s_id,
-                                    tone_intent: "neutral".to_string(),
-                                    confidence: 0.85,
-                                })
-                                .await;
-                        });
-
-                        if let Err(_) = fut.catch_unwind().await {
-                            eprintln!(
-                                "[ToneModel] Panic intercepted during tone inference for run {}",
-                                rid_inner.0
-                            );
-                        }
-                    });
-                }
-            }
-        });
-
         let (sts_event_tx, mut sts_event_rx) = mpsc::channel(100);
 
         // ── Pipeline selection ──────────────────────────────────────────────────
@@ -249,12 +233,12 @@ impl SessionActor {
             db_tasks: HashMap::new(),
             workflow_graph: None,
             conversation_graph: workflow::ConversationGraph::new(session_id.clone()),
+            graph_node_references: DashMap::new(),
             agent_tx: Some(agent_tx),
             sts_tx,
             s3_dump_tx: Some(s3_tx),
             conversation_tx,
             tts_audio_tx: Some(tts_audio_tx),
-            audio_broadcast_tx,
             ai_listen_muted: false,
             last_user_transcript: None,
             cancel_token: CancellationToken::new(),
@@ -274,8 +258,18 @@ impl SessionActor {
             pending_query_clean: None,
             pending_query_noise: None,
             pending_query_started_at: None,
+            last_sts_partial_at: None,
             pending_graph_response_version: None,
+            deferred_agent_response: None,
+            active_speech_response_node_id: None,
+            active_speech_query_node_id: None,
+            pending_interruption_generation_id: None,
+            interruption_verification_generation_id: None,
+            interruption_verification_waiting_generation_id: None,
             suppress_agent_response_until_next_user_turn: false,
+            fast_llm_active: false,
+            main_llm_active: false,
+            user_speaking: false,
             last_graph_request_version: 0,
         }
     }
@@ -372,7 +366,343 @@ impl SessionActor {
         self.speech_turn_id = self.speech_turn_id.saturating_add(1);
     }
 
+    /// Persist the fast/main LLM speaker priority only for this session.
+    /// The in-memory fields gate the SessionActor mailbox; Sled mirrors them
+    /// so interrupted/recovered actors cannot inherit stale speaker state.
+    pub fn set_llm_speaker_state(&mut self, fast_active: bool, main_active: bool) {
+        let previous = (self.fast_llm_active, self.main_llm_active);
+        // Mutual exclusion invariant: a fast request and a main-agent speech
+        // turn can never own the session transport simultaneously.
+        if fast_active && main_active {
+            self.fast_llm_active = true;
+            self.main_llm_active = false;
+        } else {
+            self.fast_llm_active = fast_active;
+            self.main_llm_active = main_active;
+        }
+        if previous != (self.fast_llm_active, self.main_llm_active) {
+            tracing::info!(
+                session = %self.session_id,
+                previous_fast = previous.0,
+                previous_main = previous.1,
+                fast_llm_active = self.fast_llm_active,
+                main_llm_active = self.main_llm_active,
+                "LLM speaker ownership changed"
+            );
+        }
+        if let Ok(tree) = self.orch.local_db.open_tree("session_runtime") {
+            let base = format!("session:{}:llm_speaker", self.session_id);
+            let _ = tree.insert(
+                format!("{}:fast", base).as_bytes(),
+                self.fast_llm_active.to_string().as_bytes(),
+            );
+            let _ = tree.insert(
+                format!("{}:main", base).as_bytes(),
+                self.main_llm_active.to_string().as_bytes(),
+            );
+            let _ = tree.insert(
+                format!("{}:user_speaking", base).as_bytes(),
+                self.user_speaking.to_string().as_bytes(),
+            );
+        }
+    }
+
+    pub fn set_user_speaking(&mut self, speaking: bool) {
+        self.user_speaking = speaking;
+        if let Ok(tree) = self.orch.local_db.open_tree("session_runtime") {
+            let key = format!("session:{}:llm_speaker:user_speaking", self.session_id);
+            let _ = tree.insert(key.as_bytes(), speaking.to_string().as_bytes());
+        }
+        tracing::info!(
+            session = %self.session_id,
+            user_speaking = speaking,
+            fast_llm_active = self.fast_llm_active,
+            main_llm_active = self.main_llm_active,
+            "caller speech ownership changed"
+        );
+    }
+
+    pub fn main_llm_may_emit(&self) -> bool {
+        self.main_llm_active
+            && !self.fast_llm_active
+            && !self.user_speaking
+            && !self.suppress_agent_response_until_next_user_turn
+    }
+
+    pub async fn record_speech_interruption(&mut self, generation_id: u64, timestamp_ms: u64) {
+        self.pending_interruption_generation_id = Some(generation_id);
+        if self.interruption_verification_generation_id != Some(generation_id) {
+            self.interruption_verification_generation_id = None;
+        }
+        if self.interruption_verification_waiting_generation_id != Some(generation_id) {
+            self.interruption_verification_waiting_generation_id = None;
+        }
+        let response_node_id = self.active_speech_response_node_id.clone().or_else(|| {
+            self.deferred_agent_response
+                .as_ref()
+                .map(|response| response.response_node_id.clone())
+        });
+        let query_node_id = self
+            .active_speech_query_node_id
+            .clone()
+            .or_else(|| {
+                self.deferred_agent_response
+                    .as_ref()
+                    .and_then(|response| response.query_node_id.clone())
+            })
+            .or_else(|| {
+                if response_node_id.is_none() {
+                    self.conversation_graph.latest_user_node.clone()
+                } else {
+                    None
+                }
+            });
+        if self
+            .conversation_graph
+            .append_assistant_interrupted_for_nodes(
+                generation_id,
+                timestamp_ms,
+                response_node_id.as_deref(),
+                query_node_id.as_deref(),
+            )
+            .is_some()
+        {
+            self.publish_graph_state().await;
+        }
+    }
+
+    pub fn clear_llm_speaker_state(&mut self) {
+        self.set_llm_speaker_state(false, false);
+        if let Ok(tree) = self.orch.local_db.open_tree("session_runtime") {
+            let base = format!("session:{}:llm_speaker", self.session_id);
+            let _ = tree.remove(format!("{}:fast", base).as_bytes());
+            let _ = tree.remove(format!("{}:main", base).as_bytes());
+            let _ = tree.remove(format!("{}:user_speaking", base).as_bytes());
+        }
+    }
+
+    /// Graph-worker reconciliation: copy lightweight, context-aware node
+    /// references into the session-local DashMap. Full node bodies remain only
+    /// in ConversationGraph; the map is never exposed as a mutation interface.
+    pub fn clear_session_runtime_state(&mut self) {
+        self.clear_llm_speaker_state();
+        self.conversation_graph.reset();
+        self.graph_node_references.clear();
+        self.pending_user_turn = None;
+        self.pending_query_id = None;
+        self.pending_query_text = None;
+        self.pending_query_clean = None;
+        self.pending_query_noise = None;
+        self.pending_query_started_at = None;
+        self.deferred_agent_response = None;
+        self.active_speech_response_node_id = None;
+        self.active_speech_query_node_id = None;
+        self.pending_interruption_generation_id = None;
+        self.interruption_verification_generation_id = None;
+        self.interruption_verification_waiting_generation_id = None;
+        self.last_user_transcript = None;
+        self.suppress_agent_response_until_next_user_turn = false;
+
+        let prefixes = vec![
+            format!("session:{}", self.session_id),
+            format!("timeout:{}", self.session_id),
+            format!("session:deleted:{}", self.session_id),
+        ];
+        for prefix in prefixes {
+            let keys = self
+                .orch
+                .local_db
+                .scan_prefix(prefix.as_bytes())
+                .filter_map(|entry| entry.ok().map(|(key, _)| key))
+                .collect::<Vec<_>>();
+            for key in keys {
+                let _ = self.orch.local_db.remove(key);
+            }
+        }
+        let exact_keys = [
+            format!("session:{}", self.session_id),
+            format!("session:deleted:{}", self.session_id),
+        ];
+        for key in exact_keys {
+            let _ = self.orch.local_db.remove(key.as_bytes());
+        }
+        let _ = self.orch.local_db.flush();
+        tracing::info!(session = %self.session_id, "cleared SessionActor graph, DashMap references, and Sled session state");
+    }
+
+    pub fn sync_graph_node_references(&self) {
+        let live_ids: std::collections::BTreeSet<String> =
+            self.conversation_graph.nodes.keys().cloned().collect();
+        self.graph_node_references
+            .retain(|node_id, _| live_ids.contains(node_id));
+        for (node_id, node) in &self.conversation_graph.nodes {
+            self.graph_node_references.insert(
+                node_id.clone(),
+                workflow::ConversationNodeReference::from_node(node),
+            );
+        }
+    }
+
+    /// Read-only Agent context lookup. Selects references from the session
+    /// DashMap, then resolves those references to bounded graph nodes.
+    pub fn read_graph_reference_context(
+        &self,
+        query_id: &str,
+        requested_node_ids: &[String],
+        include_connected_nodes: bool,
+    ) -> Option<String> {
+        self.sync_graph_node_references();
+        let snapshot = self
+            .conversation_graph
+            .relevant_snapshot_json_for_query(query_id)?;
+        let snapshot_value = serde_json::from_str::<serde_json::Value>(&snapshot).ok()?;
+        let connected_ids = snapshot_value["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|node| node.get("id")?.as_str().map(str::to_string))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let mut references = connected_ids
+            .iter()
+            .filter_map(|node_id| {
+                self.graph_node_references
+                    .get(node_id)
+                    .map(|entry| entry.value().clone())
+            })
+            .collect::<Vec<_>>();
+        references.sort_by(|left, right| {
+            right
+                .turn_id
+                .cmp(&left.turn_id)
+                .then_with(|| right.graph_version.cmp(&left.graph_version))
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
+        references.truncate(64);
+        let relations = snapshot_value["relations"].clone();
+        let mut context = serde_json::json!({
+            "graph_version": self.conversation_graph.graph_version,
+            "query_id": query_id,
+            "latest_user_node": snapshot_value["latest_user_node"].clone(),
+            "latest_context_node": snapshot_value["latest_context_node"].clone(),
+            "node_references": references,
+            "relations": relations,
+            "resolved_nodes": [],
+        });
+
+        let interrupted_responses = connected_ids
+            .iter()
+            .filter_map(|node_id| self.conversation_graph.nodes.get(node_id))
+            .filter(|node| {
+                node.interruption_state
+                    .as_ref()
+                    .is_some_and(|state| state.replay_prompt_pending)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut interruption_related_ids = std::collections::BTreeSet::new();
+        for response in &interrupted_responses {
+            interruption_related_ids.insert(response.id.clone());
+            for parent_id in &response.parent_ids {
+                if self
+                    .conversation_graph
+                    .nodes
+                    .get(parent_id)
+                    .is_some_and(|node| node.kind == workflow::ConversationNodeKind::ToolContext)
+                {
+                    interruption_related_ids.insert(parent_id.clone());
+                }
+            }
+            interruption_related_ids.extend(
+                connected_ids
+                    .iter()
+                    .filter(|node_id| {
+                        self.conversation_graph
+                            .nodes
+                            .get(*node_id)
+                            .is_some_and(|node| {
+                                node.kind == workflow::ConversationNodeKind::AssistantInterrupted
+                                    && node.parent_ids.contains(&response.id)
+                            })
+                    })
+                    .cloned(),
+            );
+        }
+
+        let resolved = if include_connected_nodes {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut ids = interruption_related_ids
+                .into_iter()
+                .filter(|node_id| seen.insert(node_id.clone()))
+                .collect::<Vec<_>>();
+            let mut recent = connected_ids.iter().cloned().collect::<Vec<_>>();
+            recent.sort_by_key(|node_id| {
+                std::cmp::Reverse(
+                    self.conversation_graph
+                        .nodes
+                        .get(node_id)
+                        .map_or(0, |node| node.graph_version),
+                )
+            });
+            ids.extend(
+                recent
+                    .into_iter()
+                    .filter(|node_id| seen.insert(node_id.clone())),
+            );
+            ids.into_iter()
+                .take(24)
+                .filter_map(|node_id| self.conversation_graph.nodes.get(&node_id).cloned())
+                .collect::<Vec<_>>()
+        } else if !requested_node_ids.is_empty() {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut ids = interruption_related_ids
+                .into_iter()
+                .filter(|node_id| seen.insert(node_id.clone()))
+                .collect::<Vec<_>>();
+            ids.extend(
+                requested_node_ids
+                    .iter()
+                    .filter(|node_id| connected_ids.contains(*node_id))
+                    .take(6)
+                    .filter(|node_id| seen.insert((*node_id).clone()))
+                    .cloned(),
+            );
+            ids.into_iter()
+                .take(24)
+                .filter_map(|node_id| self.conversation_graph.nodes.get(&node_id).cloned())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        context["resolved_nodes"] = serde_json::json!(resolved);
+        if !interrupted_responses.is_empty() {
+            let interruption_contexts = interrupted_responses
+                .iter()
+                .map(|response| {
+                    let linked_tool_contexts = response
+                        .parent_ids
+                        .iter()
+                        .filter_map(|parent_id| self.conversation_graph.nodes.get(parent_id))
+                        .filter(|node| node.kind == workflow::ConversationNodeKind::ToolContext)
+                        .collect::<Vec<_>>();
+                    serde_json::json!({
+                        "response": response,
+                        "linked_tool_contexts": linked_tool_contexts,
+                    })
+                })
+                .collect::<Vec<_>>();
+            context["interrupted_response_guidance"] = serde_json::json!({
+                "replay_prompt_pending": true,
+                "instruction": "An assistant response was interrupted before the caller heard it completely. Use the interrupted response and its linked tool context to understand what was being said. If the caller's latest message is a request to repeat, continue, or clarify that response, briefly ask whether they want the remaining answer repeated or clarified; do not claim the caller heard the cut-off content. Speak only after the caller turn is complete.",
+                "responses": interruption_contexts,
+            });
+        }
+        Some(context.to_string())
+    }
+
     pub async fn publish_graph_state(&self) {
+        self.sync_graph_node_references();
         let Some(user_id) = self.conversation_graph.latest_user_node.as_ref() else {
             return;
         };
@@ -381,15 +711,32 @@ impl SessionActor {
         };
         let query_id = user_node.event_id.clone();
         let query_created_at = user_node.created_at.clone();
+        let graph_snapshot = self
+            .conversation_graph
+            .relevant_snapshot_json_for_query(&query_id)
+            .and_then(|snapshot| serde_json::from_str::<serde_json::Value>(&snapshot).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
         // This is a lifecycle checkpoint, not an inference payload.  Keeping
         // snapshots out of Sled avoids routing a large graph through the
         // orchestrator merely because relation state changed.
         let payload = serde_json::json!({
+            "session_id": self.session_id,
             "query_id": query_id,
             "query_created_at": query_created_at,
             "graph_version": self.conversation_graph.graph_version,
             "pending_node_count": self.conversation_graph.pending_llm_node_ids().len(),
+            "latest_user_node": self.conversation_graph.latest_user_node.clone(),
+            "latest_context_node": self.conversation_graph.latest_context_node.clone(),
+            "node_count": self.conversation_graph.nodes.len(),
+            "dashmap_reference_count": self.graph_node_references.len(),
+            "graph_snapshot": graph_snapshot,
         });
+        tracing::info!(
+            session = %self.session_id,
+            graph_version = self.conversation_graph.graph_version,
+            graph_data = %payload,
+            "in-memory conversation graph snapshot"
+        );
         if let Ok(tree) = self.orch.local_db.open_tree("session_graph") {
             let key = format!(
                 "session:{}:{}",
@@ -431,6 +778,7 @@ impl SessionActor {
         }
 
         self.orch.phone_media.close(&self.session_id);
+        self.clear_session_runtime_state();
         if let Some(graph) = &mut self.workflow_graph {
             graph.release();
         }
@@ -682,8 +1030,10 @@ impl SessionActor {
 impl Drop for SessionActor {
     fn drop(&mut self) {
         // Also runs when the session future unwinds or is aborted.
+        self.clear_llm_speaker_state();
         self.cancel_token.cancel();
         self.orch.phone_media.close(&self.session_id);
+        self.graph_node_references.clear();
         if let Some(tx) = &self.agent_tx {
             let _ = tx.try_send(AgentCmd::Cancel {
                 run_id: self.run_id.clone(),

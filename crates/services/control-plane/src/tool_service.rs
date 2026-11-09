@@ -44,13 +44,23 @@ impl ToolExecutionService for ToolExecutionServiceImpl {
                     .or_else(|| args.get("q"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let query_is_refined = args
+                    .get("query_already_refined")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
                 let rag = rag::RAGPipeline::new(self.db.clone());
                 // These independent reads were sequential. With a slow remote
                 // database each could consume most of the caller's tool timeout,
                 // causing otherwise valid searches to retry forever.
-                let (knowledge_matches, results) =
+                let (knowledge_matches, results) = if query_is_refined {
+                    tokio::try_join!(
+                        rag.search_knowledge_rewritten(query),
+                        rag.search_rewritten(query),
+                    )
+                } else {
                     tokio::try_join!(rag.search_knowledge(query), rag.search(query),)
-                        .map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
+                }
+                .map_err(|_| tonic::Status::unavailable("Database unavailable"))?;
                 let cfg =
                     config::AppConfig::load().unwrap_or_else(|_| config::AppConfig::load_default());
 

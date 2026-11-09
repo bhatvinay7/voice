@@ -341,6 +341,9 @@ impl Orchestrator {
             QueueEvent::InterviewerSpeech { session_id, .. } => Some(session_id.clone()),
             QueueEvent::BargeInTrigger { session_id, .. } => Some(session_id.clone()),
             QueueEvent::StsEvent { session_id, .. } => Some(session_id.clone()),
+            QueueEvent::VerifyInterruptionSpeechState { session_id, .. } => {
+                Some(session_id.clone())
+            }
             QueueEvent::GraphNodesFetched { session_id, .. } => Some(session_id.clone()),
             QueueEvent::Agent(agent_event) => {
                 let run_id = match agent_event {
@@ -400,8 +403,13 @@ impl Orchestrator {
             }
             let mut is_new = false;
             if let QueueEvent::SessionStarted { .. } = &event {
-                if self.session_inboxes.contains_key(&sid) {
-                    return;
+                if let Some(existing) = self.session_inboxes.remove(&sid) {
+                    let old_session_id = sid.clone();
+                    let _ = existing.1.try_send(QueueEvent::SessionCancelled {
+                        session_id: old_session_id.clone(),
+                    });
+                    let _ = self.slots.release(&old_session_id);
+                    tracing::info!(session = %sid, "SessionStarted reused an active session ID; terminating old SessionActor before creating a fresh graph");
                 }
                 if let Err(error) = self.slots.acquire(&sid, chrono::Utc::now().timestamp()) {
                     tracing::warn!(%sid, %error, "cell admission rejected");
@@ -482,14 +490,17 @@ impl Orchestrator {
                     let _ = self.local_db.flush();
                     return;
                 }
-                // Check Sled persistent store or active call- prefix for graceful session recovery
-                let is_persisted = match self.local_db.get(format!("session:{}", sid).as_bytes()) {
-                    Ok(Some(_)) => true,
-                    _ => {
-                        sid.starts_with("call-")
-                            && !matches!(&event, QueueEvent::SessionCancelled { .. })
-                    }
-                };
+                // Never infer an active session from the call-* prefix.  A new
+                // call must only recover from an explicit SessionStarted event
+                // or the persisted session marker created by SessionStarted.
+                // This prevents an old graph/local DB state from resurrecting
+                // after the same UI or reconnect path has ended the call.
+                let is_persisted = self
+                    .local_db
+                    .get(format!("session:{}", sid).as_bytes())
+                    .ok()
+                    .flatten()
+                    .is_some();
 
                 if is_persisted && !matches!(&event, QueueEvent::SessionCancelled { .. }) {
                     if self

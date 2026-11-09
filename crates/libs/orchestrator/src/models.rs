@@ -89,6 +89,12 @@ pub enum QueueEvent {
         session_id: String,
         event: StsPipelineEvent,
     },
+    VerifyInterruptionSpeechState {
+        session_id: String,
+        generation_id: u64,
+        attempt: u8,
+        consecutive_silent_checks: u8,
+    },
     GraphNodesFetched {
         session_id: String,
         user_id: String,
@@ -107,6 +113,9 @@ pub enum QueueEvent {
     GraphContextRequested {
         session_id: String,
         query_id: String,
+        /// Optional exact reference IDs selected by the fast LLM. Empty means
+        /// return only the bounded reference/title index, not full node bodies.
+        node_ids: Vec<String>,
         reply_to: mpsc::Sender<GraphContextResponse>,
     },
     /// A background graph worker may propose enrichment, but it must return
@@ -218,6 +227,11 @@ pub enum StsPipelineEvent {
     /// Caller speech has started. Stop local playback immediately even if the
     /// transport's playback flag has already fallen behind buffered audio.
     UserSpeechStarted,
+    /// Caller speech ended. Main-agent output may resume unless a finalized
+    /// transcript has already transferred ownership to the fast planner.
+    UserSpeechEnded,
+    /// Audio verification completed without a usable caller query.
+    InterruptionFalsePositive,
     /// User interrupted the AI
     BargeIn,
     /// Non-fatal or fatal error inside the STS pipeline
@@ -341,12 +355,6 @@ pub enum AgentCmd {
         run_id: RunId,
         kind: crate::speech_filter::ContinuationKind,
     },
-    InjectToneContext {
-        run_id: RunId,
-        session_id: String,
-        tone_intent: String,
-        confidence: f32,
-    },
     SetAiListenMute {
         run_id: RunId,
         muted: bool,
@@ -427,6 +435,17 @@ pub enum AgentEvent {
         run_id: RunId,
         error: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferredAgentResponse {
+    pub run_id: RunId,
+    pub query_id: Option<String>,
+    pub query_node_id: Option<String>,
+    pub response_node_id: String,
+    pub playback_generation: u64,
+    pub result: String,
+    pub relevance: ConversationRelevance,
 }
 
 #[derive(Debug, Clone)]

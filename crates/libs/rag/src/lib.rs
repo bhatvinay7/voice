@@ -127,6 +127,13 @@ impl RAGPipeline {
     /// Dynamic semantic & keyword search across database property listings.
     pub async fn search(&self, query: &str) -> Result<Vec<RAGSearchResult>, String> {
         let query = self.rewrite_query(query).await;
+        self.search_rewritten(&query).await
+    }
+
+    /// Searches using a query already refined by the main-agent evaluator.
+    /// This deliberately bypasses the generic fast-model rewriter so the
+    /// evaluator's context-aware constraints are not rewritten away.
+    pub async fn search_rewritten(&self, query: &str) -> Result<Vec<RAGSearchResult>, String> {
         if !self.upstash_url.trim().is_empty() && !self.upstash_token.trim().is_empty() {
             return self.search_vector_db_rewritten(&query, 10).await;
         }
@@ -254,6 +261,14 @@ impl RAGPipeline {
         query: &str,
     ) -> Result<Vec<KnowledgeSearchResult>, String> {
         let query = self.rewrite_query(query).await;
+        self.search_knowledge_rewritten(&query).await
+    }
+
+    /// Knowledge retrieval counterpart for evaluator-refined queries.
+    pub async fn search_knowledge_rewritten(
+        &self,
+        query: &str,
+    ) -> Result<Vec<KnowledgeSearchResult>, String> {
         let q_lower = query.to_lowercase();
         let query_tokens: Vec<&str> = q_lower
             .split(|c: char| !c.is_alphanumeric())

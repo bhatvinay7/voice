@@ -273,6 +273,56 @@ impl SummaryCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationNodeReference {
+    pub node_id: String,
+    pub event_id: String,
+    pub main_title: String,
+    pub kind: ConversationNodeKind,
+    pub turn_id: u64,
+    pub revision: u64,
+    pub graph_version: u64,
+    pub interrupted: bool,
+    pub replay_prompt_pending: bool,
+}
+
+impl ConversationNodeReference {
+    pub fn from_node(node: &ConversationNode) -> Self {
+        let normalized = node
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let preview = normalized.chars().take(80).collect::<String>();
+        let main_title = match node.kind {
+            ConversationNodeKind::UserText => format!("User: {preview}"),
+            ConversationNodeKind::OptimizedIntent => format!("Intent: {preview}"),
+            ConversationNodeKind::ToolRequest => format!("Tool request: {preview}"),
+            ConversationNodeKind::ToolContext => format!("Tool context: {preview}"),
+            ConversationNodeKind::AssistantResponse if node.interrupted => {
+                format!("Assistant (interrupted): {preview}")
+            }
+            ConversationNodeKind::AssistantResponse => format!("Assistant: {preview}"),
+            ConversationNodeKind::AssistantInterrupted => "Assistant interrupted".to_string(),
+            ConversationNodeKind::GraphEnrichment => format!("Graph context: {preview}"),
+        };
+        Self {
+            node_id: node.id.clone(),
+            event_id: node.event_id.clone(),
+            main_title,
+            kind: node.kind.clone(),
+            turn_id: node.turn_id,
+            revision: node.revision,
+            graph_version: node.graph_version,
+            interrupted: node.interrupted,
+            replay_prompt_pending: node
+                .interruption_state
+                .as_ref()
+                .is_some_and(|state| state.replay_prompt_pending),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConversationNodeKind {
     UserText,
     OptimizedIntent,
@@ -304,9 +354,27 @@ pub struct ConversationNode {
     /// Revision spoken through STS to the caller.
     #[serde(default)]
     pub user_spoken_revision: u64,
+    /// True when playback stopped before the caller heard the complete response.
+    #[serde(default)]
+    pub interrupted: bool,
+    #[serde(default)]
+    pub interruption_state: Option<InterruptionState>,
     /// Stable source identity used by graph restructuring/upsert operations.
     #[serde(default)]
     pub source_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InterruptionState {
+    pub generation_id: u64,
+    pub timestamp_ms: u64,
+    pub replay_prompt_pending: bool,
+    #[serde(default)]
+    pub response_node_id: Option<String>,
+    #[serde(default)]
+    pub query_node_id: Option<String>,
+    #[serde(default)]
+    pub response_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -325,6 +393,14 @@ impl ConversationGraph {
             session_id: session_id.into(),
             ..Self::default()
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.graph_version = self.graph_version.saturating_add(1);
+        self.next_turn_id = 0;
+        self.nodes.clear();
+        self.latest_user_node = None;
+        self.latest_context_node = None;
     }
 
     pub fn append_user_text(&mut self, text: &str) -> Option<String> {
@@ -371,6 +447,8 @@ impl ConversationGraph {
             ready: true,
             llm_seen_revision: 1,
             user_spoken_revision: 1,
+            interrupted: false,
+            interruption_state: None,
             source_key: None,
         };
         self.nodes.insert(id.clone(), node);
@@ -404,6 +482,8 @@ impl ConversationGraph {
                 ready: true,
                 llm_seen_revision: 1,
                 user_spoken_revision: 1,
+                interrupted: false,
+                interruption_state: None,
                 source_key: None,
             },
         );
@@ -453,9 +533,12 @@ impl ConversationGraph {
                 ready: true,
                 llm_seen_revision: 1,
                 user_spoken_revision: 0,
+                interrupted: false,
+                interruption_state: None,
                 source_key,
             },
         );
+        self.latest_context_node = Some(id.clone());
         Some(id)
     }
 
@@ -469,33 +552,186 @@ impl ConversationGraph {
         generation_id: u64,
         timestamp_ms: u64,
     ) -> Option<String> {
-        let source_key = format!("assistant-interrupted:{generation_id}");
-        if self
-            .nodes
-            .values()
-            .any(|node| node.source_key.as_deref() == Some(source_key.as_str()))
-        {
-            return None;
-        }
-        self.graph_version = self.graph_version.saturating_add(1);
-        let id = format!("interrupted-{}", self.graph_version);
-        let parent_ids = self
+        let query_node_id = self.latest_user_node.clone();
+        let response_node_id = self
             .nodes
             .iter()
-            .rev()
-            .find(|(_, node)| matches!(node.kind, ConversationNodeKind::AssistantResponse))
-            .map(|(id, _)| vec![id.clone()])
-            .or_else(|| self.latest_user_node.clone().map(|id| vec![id]))
-            .unwrap_or_default();
-        self.nodes.insert(id.clone(), ConversationNode {
-            id: id.clone(), event_id: uuid::Uuid::new_v4().to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(), kind: ConversationNodeKind::AssistantInterrupted,
-            turn_id: self.next_turn_id, revision: 1,
-            content: format!("Caller interrupted assistant playback at {timestamp_ms} ms (generation {generation_id})."),
-            parent_ids, graph_version: self.graph_version, ready: true,
-            llm_seen_revision: 1, user_spoken_revision: 0, source_key: Some(source_key),
+            .filter(|(_, node)| {
+                node.kind == ConversationNodeKind::AssistantResponse
+                    && !node.interrupted
+                    && node.user_spoken_revision < node.revision
+            })
+            .max_by_key(|(_, node)| node.graph_version)
+            .map(|(id, _)| id.clone());
+        self.append_assistant_interrupted_for_nodes(
+            generation_id,
+            timestamp_ms,
+            response_node_id.as_deref(),
+            query_node_id.as_deref(),
+        )
+    }
+
+    pub fn append_assistant_interrupted_for_nodes(
+        &mut self,
+        generation_id: u64,
+        timestamp_ms: u64,
+        response_node_id: Option<&str>,
+        query_node_id: Option<&str>,
+    ) -> Option<String> {
+        let source_key = format!("assistant-interrupted:{generation_id}");
+        let existing_interruption = self.nodes.iter().find_map(|(id, node)| {
+            (node.source_key.as_deref() == Some(source_key.as_str())
+                && node.kind == ConversationNodeKind::AssistantInterrupted)
+                .then_some(id.clone())
         });
+        let existing_state = existing_interruption
+            .as_ref()
+            .and_then(|id| self.nodes.get(id))
+            .and_then(|node| node.interruption_state.as_ref())
+            .cloned();
+        let response_node_id = response_node_id
+            .filter(|id| {
+                self.nodes
+                    .get(*id)
+                    .is_some_and(|node| node.kind == ConversationNodeKind::AssistantResponse)
+            })
+            .map(str::to_string)
+            .or_else(|| {
+                existing_state
+                    .as_ref()
+                    .and_then(|state| state.response_node_id.clone())
+            });
+        let query_node_id = query_node_id
+            .filter(|id| {
+                self.nodes
+                    .get(*id)
+                    .is_some_and(|node| node.kind == ConversationNodeKind::UserText)
+            })
+            .map(str::to_string)
+            .or_else(|| {
+                existing_state
+                    .as_ref()
+                    .and_then(|state| state.query_node_id.clone())
+            });
+        let state = InterruptionState {
+            generation_id,
+            timestamp_ms,
+            replay_prompt_pending: true,
+            response_ready: response_node_id.is_some(),
+            response_node_id: response_node_id.clone(),
+            query_node_id: query_node_id.clone(),
+        };
+
+        if let Some(interruption_id) = existing_interruption {
+            if existing_state.as_ref().is_some_and(|existing| {
+                existing.response_node_id == state.response_node_id
+                    && existing.query_node_id == state.query_node_id
+                    && existing.response_ready == state.response_ready
+            }) {
+                return None;
+            }
+            self.graph_version = self.graph_version.saturating_add(1);
+            if let Some(response_id) = &response_node_id {
+                if let Some(response) = self.nodes.get_mut(response_id) {
+                    response.interrupted = true;
+                    response.interruption_state = Some(state.clone());
+                    response.revision = response.revision.saturating_add(1);
+                    response.graph_version = self.graph_version;
+                }
+            }
+            if let Some(node) = self.nodes.get_mut(&interruption_id) {
+                node.interruption_state = Some(state);
+                node.parent_ids = response_node_id
+                    .iter()
+                    .chain(query_node_id.iter())
+                    .cloned()
+                    .collect();
+                node.revision = node.revision.saturating_add(1);
+                node.graph_version = self.graph_version;
+            }
+            self.latest_context_node = Some(interruption_id.clone());
+            return Some(interruption_id);
+        }
+
+        self.graph_version = self.graph_version.saturating_add(1);
+        if let Some(response_id) = &response_node_id {
+            if let Some(response) = self.nodes.get_mut(response_id) {
+                response.interrupted = true;
+                response.interruption_state = Some(state.clone());
+                response.revision = response.revision.saturating_add(1);
+                response.graph_version = self.graph_version;
+            }
+        }
+        let id = format!("interrupted-{}", self.graph_version);
+        let parent_ids = response_node_id
+            .iter()
+            .chain(query_node_id.iter())
+            .cloned()
+            .into_iter()
+            .collect();
+        self.nodes.insert(
+            id.clone(),
+            ConversationNode {
+                id: id.clone(),
+                event_id: uuid::Uuid::new_v4().to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                kind: ConversationNodeKind::AssistantInterrupted,
+                turn_id: self.next_turn_id,
+                revision: 1,
+                content: format!(
+                    "Caller interrupted assistant playback at {timestamp_ms} ms (generation {generation_id})."
+                ),
+                parent_ids,
+                graph_version: self.graph_version,
+                ready: true,
+                llm_seen_revision: 1,
+                user_spoken_revision: 0,
+                interrupted: false,
+                interruption_state: Some(state),
+                source_key: Some(source_key),
+            },
+        );
+        self.latest_context_node = Some(id.clone());
         Some(id)
+    }
+
+    pub fn mark_interruption_resumed(
+        &mut self,
+        response_node_id: &str,
+        generation_id: u64,
+    ) -> bool {
+        let Some(response) = self.nodes.get(response_node_id) else {
+            return false;
+        };
+        let matches_generation = response
+            .interruption_state
+            .as_ref()
+            .is_some_and(|state| state.generation_id == generation_id);
+        if !matches_generation {
+            return false;
+        }
+
+        self.graph_version = self.graph_version.saturating_add(1);
+        if let Some(response) = self.nodes.get_mut(response_node_id) {
+            response.interrupted = false;
+            if let Some(state) = &mut response.interruption_state {
+                state.replay_prompt_pending = false;
+            }
+            response.revision = response.revision.saturating_add(1);
+            response.graph_version = self.graph_version;
+        }
+        let interruption_key = format!("assistant-interrupted:{generation_id}");
+        for node in self.nodes.values_mut().filter(|node| {
+            node.kind == ConversationNodeKind::AssistantInterrupted
+                && node.source_key.as_deref() == Some(interruption_key.as_str())
+        }) {
+            if let Some(state) = &mut node.interruption_state {
+                state.replay_prompt_pending = false;
+            }
+            node.revision = node.revision.saturating_add(1);
+            node.graph_version = self.graph_version;
+        }
+        true
     }
 
     /// Store an asynchronous relation annotation on the immutable user-query
@@ -546,6 +782,8 @@ impl ConversationGraph {
                 ready: true,
                 llm_seen_revision: 1,
                 user_spoken_revision: 1,
+                interrupted: false,
+                interruption_state: None,
                 source_key: Some(source_key),
             },
         );
@@ -624,6 +862,8 @@ impl ConversationGraph {
                 ready: true,
                 llm_seen_revision: 0,
                 user_spoken_revision: 0,
+                interrupted: false,
+                interruption_state: None,
                 source_key,
             },
         );
@@ -687,6 +927,7 @@ impl ConversationGraph {
             .iter()
             .filter(|(_, node)| {
                 matches!(node.kind, ConversationNodeKind::AssistantResponse)
+                    && !node.interrupted
                     && node.user_spoken_revision < node.revision
             })
             .max_by_key(|(_, node)| node.graph_version)
@@ -709,6 +950,12 @@ impl ConversationGraph {
         let mut changed = false;
         for node_id in visited {
             if let Some(node) = self.nodes.get_mut(&node_id) {
+                if let Some(interruption) = &mut node.interruption_state {
+                    if interruption.replay_prompt_pending {
+                        interruption.replay_prompt_pending = false;
+                        changed = true;
+                    }
+                }
                 if matches!(
                     node.kind,
                     ConversationNodeKind::AssistantResponse | ConversationNodeKind::ToolContext
@@ -931,6 +1178,10 @@ pub struct OutputSequencer {
     buffered: BTreeMap<(u64, u64, u64), SpeechSegment>,
     cancelled: BTreeSet<(u64, u64)>,
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/workflow_workflow_lib_graph_reference_tests_1.rs"]
+mod graph_reference_tests;
 
 impl OutputSequencer {
     pub fn cancel_generation(&mut self, turn_id: u64, generation_id: u64) {

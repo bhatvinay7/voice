@@ -46,7 +46,12 @@ impl SessionActor {
                 let wait_message = wait_message
                     .filter(|message| !message.trim().is_empty())
                     .unwrap_or_else(|| cfg.tool_wait_tts_prompt.clone());
-                if is_search && sts_idle && !wait_message.trim().is_empty() {
+                if is_search
+                    && sts_idle
+                    && !wait_message.trim().is_empty()
+                    && !self.suppress_agent_response_until_next_user_turn
+                {
+                    self.set_llm_speaker_state(true, false);
                     self.sts_idle
                         .store(false, std::sync::atomic::Ordering::SeqCst);
                     if let Some(sts_tx) = &self.sts_tx {
@@ -147,19 +152,28 @@ impl SessionActor {
                     let Ok(_permit) = inference_semaphore.acquire_owned().await else {
                         return;
                     };
-                    execute_tool(
+                    let result = AssertUnwindSafe(execute_tool(
                         client,
                         q_tx,
-                        r_id,
-                        t_id,
-                        t_name,
+                        r_id.clone(),
+                        t_id.clone(),
+                        t_name.clone(),
                         args,
                         1,
                         task_query_id,
                         task_playback_generation,
                         cancellation,
-                    )
+                    ))
+                    .catch_unwind()
                     .await;
+                    if result.is_err() {
+                        tracing::error!(
+                            session_run = %r_id,
+                            task = %t_id.0,
+                            tool = %t_name,
+                            "tool execution task panicked; result remains graph-retained"
+                        );
+                    }
                 });
             }
 
@@ -170,13 +184,6 @@ impl SessionActor {
                 result,
                 relevance,
             } => {
-                if self.suppress_agent_response_until_next_user_turn {
-                    tracing::info!(
-                        session = %self.session_id,
-                        "dropping late agent response from interrupted generation"
-                    );
-                    return;
-                }
                 if playback_generation != self.speech_generation_id {
                     tracing::info!(session = %self.session_id, expected = self.speech_generation_id, received = playback_generation, "dropping agent response from stale playback generation");
                     return;
@@ -201,18 +208,92 @@ impl SessionActor {
                         return;
                     }
                 }
+                if self.suppress_agent_response_until_next_user_turn {
+                    self.set_llm_speaker_state(true, false);
+                    let interruption_generation = *self
+                        .pending_interruption_generation_id
+                        .get_or_insert(playback_generation);
+                    let response_id = self.conversation_graph.append_assistant_response(
+                        result.clone(),
+                        Some(format!("response:{}:{}", run_id.0, playback_generation)),
+                    );
+                    let query_node_id = self.conversation_graph.latest_user_node.clone();
+                    let interruption_id = self
+                        .conversation_graph
+                        .append_assistant_interrupted_for_nodes(
+                            interruption_generation,
+                            chrono::Utc::now().timestamp_millis().max(0) as u64,
+                            response_id.as_deref(),
+                            query_node_id.as_deref(),
+                        );
+                    if response_id.is_some() || interruption_id.is_some() {
+                        self.publish_graph_state().await;
+                    }
+                    let deferred = response_id.is_some();
+                    if let Some(response_node_id) = response_id {
+                        self.active_speech_response_node_id = Some(response_node_id.clone());
+                        self.active_speech_query_node_id = query_node_id.clone();
+                        self.deferred_agent_response = Some(DeferredAgentResponse {
+                            run_id,
+                            query_id: query_id.clone(),
+                            query_node_id,
+                            response_node_id,
+                            playback_generation,
+                            result: result.clone(),
+                            relevance,
+                        });
+                    }
+                    if let Some(graph) = &mut self.workflow_graph {
+                        graph.complete();
+                    }
+                    if relevance.is_relevant() {
+                        self.pending_user_turn = None;
+                        if graph_reconstructed {
+                            self.publish_conversation_with_relevance(
+                                "LLM_RESPONSE",
+                                serde_json::json!({
+                                    "response_text": result,
+                                    "source": "graph_reconstruction"
+                                })
+                                .to_string(),
+                                ConversationRelevance::Relevant,
+                            );
+                        }
+                    } else {
+                        self.pending_user_turn = None;
+                        tracing::info!(
+                            session = %self.session_id,
+                            "Irrelevant interrupted exchange suppressed from Redis AI history."
+                        );
+                    }
+                    tracing::info!(
+                        session = %self.session_id,
+                        ?query_id,
+                        playback_generation,
+                        deferred,
+                        "retained interrupted agent response and deferred STS delivery until caller silence"
+                    );
+                    return;
+                }
+                // This is the handoff event from fast planning to caller-facing
+                // main-model output. Stale/barred completions returned above.
+                self.set_llm_speaker_state(false, true);
+                if !self.main_llm_may_emit() {
+                    tracing::info!(session = %self.session_id, ?query_id, "main-agent completion blocked by current speaker ownership or suppression");
+                    return;
+                }
                 if !graph_reconstructed {
                     let pending = self.conversation_graph.pending_llm_node_ids();
                     self.conversation_graph.mark_llm_seen(&pending);
                 }
-                if self
-                    .conversation_graph
-                    .append_assistant_response(
-                        result.clone(),
-                        Some(format!("response:{}:{}", run_id.0, playback_generation)),
-                    )
-                    .is_some()
-                {
+                let query_node_id = self.conversation_graph.latest_user_node.clone();
+                let response_node_id = self.conversation_graph.append_assistant_response(
+                    result.clone(),
+                    Some(format!("response:{}:{}", run_id.0, playback_generation)),
+                );
+                if let Some(response_node_id) = response_node_id {
+                    self.active_speech_response_node_id = Some(response_node_id);
+                    self.active_speech_query_node_id = query_node_id;
                     self.publish_graph_state().await;
                 }
                 if let Some(graph) = &mut self.workflow_graph {
@@ -258,6 +339,10 @@ impl SessionActor {
             }
 
             AgentEvent::Failed { run_id, error } => {
+                if self.suppress_agent_response_until_next_user_turn {
+                    return;
+                }
+                self.set_llm_speaker_state(true, false);
                 if let Some(graph) = &mut self.workflow_graph {
                     graph.fail();
                 }
@@ -292,6 +377,10 @@ impl SessionActor {
             }
 
             AgentEvent::NeedsUserInput { run_id, question } => {
+                if self.suppress_agent_response_until_next_user_turn {
+                    return;
+                }
+                self.set_llm_speaker_state(true, false);
                 if self
                     .conversation_graph
                     .append_assistant_response(
@@ -330,6 +419,10 @@ impl SessionActor {
                     }
                 }
                 if permitted {
+                    if self.suppress_agent_response_until_next_user_turn {
+                        return;
+                    }
+                    self.set_llm_speaker_state(true, false);
                     if let (Some(message), Some(sts_tx)) = (wait_message, &self.sts_tx) {
                         let _ = sts_tx
                             .send(crate::models::StsPipelineCmd::InjectFastContext {
