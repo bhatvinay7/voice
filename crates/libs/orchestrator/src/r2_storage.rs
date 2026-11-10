@@ -6,6 +6,10 @@ use sha2::{Digest, Sha256};
 type HmacSha256 = Hmac<Sha256>;
 
 const MAX_PACKET_GAP_SAMPLES: usize = 16_000 / 50;
+const USER_NORMALIZATION_TARGET_RMS: f64 = 0.18 * i16::MAX as f64;
+const USER_NORMALIZATION_MAX_PEAK: f64 = 0.92 * i16::MAX as f64;
+const USER_NORMALIZATION_MAX_GAIN: f64 = 6.0;
+const ACTIVE_SAMPLE_FLOOR: i16 = 200;
 
 fn r2_origin_url(cfg: &AppConfig) -> String {
     if cfg.r2_endpoint_url.contains(".r2.cloudflarestorage.com") {
@@ -71,6 +75,12 @@ pub fn build_conversation_wav(chunks: &mut [S3DumpData]) -> Result<Vec<u8>, Stri
         return Err("No audio frames were captured for this call".to_string());
     }
 
+    // The recording is stereo: caller on the left, assistant on the right.
+    // Normalize only the stored caller channel after capture, never the live
+    // STT/VAD stream. This lifts quiet microphones while keeping headroom and
+    // avoiding amplification of near-silence between turns.
+    normalize_recorded_user_track(&mut user_track);
+
     let data_size = sample_count
         .checked_mul(4)
         .and_then(|size| u32::try_from(size).ok())
@@ -100,6 +110,44 @@ pub fn build_conversation_wav(chunks: &mut [S3DumpData]) -> Result<Vec<u8>, Stri
         );
     }
     Ok(wav)
+}
+
+fn normalize_recorded_user_track(samples: &mut [i16]) {
+    let active = samples
+        .iter()
+        .copied()
+        .filter(|sample| sample.unsigned_abs() >= ACTIVE_SAMPLE_FLOOR as u16)
+        .collect::<Vec<_>>();
+    if active.is_empty() {
+        return;
+    }
+    let peak = active
+        .iter()
+        .map(|sample| f64::from(sample.unsigned_abs()))
+        .fold(0.0_f64, f64::max);
+    let rms = (active
+        .iter()
+        .map(|sample| {
+            let sample = f64::from(*sample);
+            sample * sample
+        })
+        .sum::<f64>()
+        / active.len() as f64)
+        .sqrt();
+    if peak == 0.0 || rms == 0.0 {
+        return;
+    }
+    let gain = (USER_NORMALIZATION_TARGET_RMS / rms)
+        .min(USER_NORMALIZATION_MAX_PEAK / peak)
+        .min(USER_NORMALIZATION_MAX_GAIN);
+    if gain <= 1.0 {
+        return;
+    }
+    for sample in samples {
+        *sample = (f64::from(*sample) * gain)
+            .round()
+            .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+    }
 }
 
 fn downmix_and_resample(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<i16> {
