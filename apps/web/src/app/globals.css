@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 :root, html.dark, [data-theme="dark"], [data-theme="obsidian"], .dark {
+  --font-sans: "Manrope", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --bg-main: #050607;
   --bg-card: #0c0d10;
   --bg-card-hover: #15171b;

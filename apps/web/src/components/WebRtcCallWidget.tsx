@@ -33,25 +33,26 @@ export function WebRtcCallWidget({
   const [liveKitUrl, setLiveKitUrl] = useState<string>("");
   const [customInputText, setCustomInputText] = useState<string>("");
   const wsRef = useRef<WebSocket | null>(null);
+  const [sessionCallId, setSessionCallId] = useState<string>(callId);
 
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
 
   // --- WebSocket helpers (session-id-aware JSON protocol) ---
   const sendWsMessage = useCallback((payload: Record<string, unknown>) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ session_id: callId, ...payload }));
+      wsRef.current.send(JSON.stringify({ session_id: sessionCallId, ...payload }));
     }
-  }, [callId]);
+  }, [sessionCallId]);
 
-  const openWs = useCallback(() => {
+  const openWs = useCallback((sessionId: string) => {
     if (wsRef.current) return; // already open
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
-    ws.onopen = () => console.log(`[WS] Connected for session ${callId}`);
+    ws.onopen = () => console.log(`[WS] Connected for session ${sessionId}`);
     ws.onerror = (e) => console.warn("[WS] Error", e);
     ws.onclose = () => { wsRef.current = null; };
     wsRef.current = ws;
-  }, [callId]);
+  }, []);
 
   const closeWs = useCallback(() => {
     wsRef.current?.close();
@@ -73,7 +74,7 @@ export function WebRtcCallWidget({
       await fetch("/api/calls/pause", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: callId, paused: nextPaused }),
+        body: JSON.stringify({ session_id: sessionCallId, paused: nextPaused }),
       });
     } catch (err: unknown) {
       console.warn("Failed to notify backend about pause state:", err);
@@ -82,9 +83,9 @@ export function WebRtcCallWidget({
 
   // Fetch initial cached suggestions & subscribe to SSE
   useEffect(() => {
-    if (!callId) return;
+    if (!sessionCallId) return;
 
-    fetch(`/api/calls/suggestions/${callId}`)
+    fetch(`/api/calls/suggestions/${sessionCallId}`)
       .then((res: Response) => res.json())
       .then((data: { suggestions?: PropertySuggestion[] }) => {
         if (data.suggestions && Array.isArray(data.suggestions)) {
@@ -95,7 +96,7 @@ export function WebRtcCallWidget({
 
     if (!isCallActive) return;
 
-    const sse = new EventSource(`/api/calls/suggestions/sse?call_id=${callId}`);
+    const sse = new EventSource(`/api/calls/suggestions/sse?call_id=${sessionCallId}`);
     sse.onmessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data) as { suggestions?: PropertySuggestion[] };
@@ -110,7 +111,7 @@ export function WebRtcCallWidget({
     return () => {
       sse.close();
     };
-  }, [isCallActive, callId]);
+  }, [isCallActive, sessionCallId]);
 
   // Dynamic AI State Simulation when call is active
   useEffect(() => {
@@ -135,10 +136,12 @@ export function WebRtcCallWidget({
     if (!isCallActive) {
       setCallError(null);
       try {
+        const nextCallId = `call-${typeof crypto !== "undefined" ? crypto.randomUUID() : Date.now()}`;
+        setSessionCallId(nextCallId);
         const res = await fetch("/api/calls/session", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ call_id: callId, user_id: userId }),
+          body: JSON.stringify({ call_id: nextCallId, user_id: userId }),
         });
         const data = (await res.json()) as {
           livekit_token?: string;
@@ -162,7 +165,7 @@ export function WebRtcCallWidget({
         }
         setIsCallActive(true);
         onToggleCallState?.(true);
-        openWs();
+        openWs(nextCallId);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Network error reaching backend.";
         setCallError(`Failed to initialise call session: ${msg}`);
@@ -174,7 +177,7 @@ export function WebRtcCallWidget({
       fetch("/api/calls/end", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ call_id: callId, user_id: userId }),
+        body: JSON.stringify({ call_id: sessionCallId, user_id: userId }),
       }).catch((err) => console.warn("[Call] End-call notice:", err));
       setIsCallActive(false);
       setLiveKitToken("");

@@ -32,6 +32,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Neon database unavailable or migrations missing");
     let pubsub = create_shared_bus(100);
 
+    let service_mode = std::env::var("SERVICE_MODE")
+        .unwrap_or_else(|_| "voice".to_string())
+        .to_lowercase();
+
+    if service_mode == "api" {
+        let local_db = sled::open("/data/api_server_db")
+            .or_else(|_| sled::open(".local_data/api_server_db"))
+            .or_else(|_| sled::open(std::env::temp_dir().join("api_server_db")))?;
+        let capacity = std::env::var("CELL_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1);
+        let slots = orchestrator::slots::Slots::new(&local_db, capacity)?;
+        let (orch_tx, _orch_rx) = mpsc::channel::<QueueEvent>(1);
+        let state = AppState {
+            slots,
+            phone_media: orchestrator::phone_media::PhoneMediaRegistry::default(),
+            db: db.clone(),
+            orch_tx,
+            config: cfg.clone(),
+            pubsub: pubsub.clone(),
+            rag: Arc::new(rag::RAGPipeline::new(db.clone())),
+        };
+
+        let app = api::rest_api_routes().with_state(state);
+        let port = std::env::var("API_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(cfg.port);
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        tracing::info!(%addr, service = "rest-api", "Separate REST API server listening");
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+        return Ok(());
+    }
+
     // 1. Start Upstash Redis Streams -> PostgreSQL Async Worker Group
 
     // 2. Setup MPSC Channels & Protected Receivers for Panic Resilience
@@ -168,9 +204,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rag: Arc::new(rag::RAGPipeline::new(db.clone())),
     };
 
-    let app = api::api_routes().with_state(state);
+    let app = api::voice_api_routes().with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
+    let voice_port = std::env::var("API_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(cfg.port);
+    let addr = SocketAddr::from(([0, 0, 0, 0], voice_port));
     println!("[Axum Server] Listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

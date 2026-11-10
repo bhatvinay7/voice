@@ -13,13 +13,18 @@ const API_BASE = "/api";
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+  const headers = new Headers(options?.headers);
+  if (!headers.has("Content-Type") && options?.body) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", "Bearer " + token);
+  }
+
   const res = await fetch(`${API_BASE}${url}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options?.headers,
-    },
     ...options,
+    headers,
+    credentials: options?.credentials ?? "same-origin",
   });
   if (!res.ok) {
     const errorBody = await res.json().catch(() => null) as { error?: string; message?: string } | null;

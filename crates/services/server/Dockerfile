@@ -45,5 +45,5 @@ RUN chown voiceapp:voiceapp /app/server && chmod +x /app/server
 
 USER 999
 
-EXPOSE 4000
+EXPOSE 4000 4001
 CMD ["/app/server"]
