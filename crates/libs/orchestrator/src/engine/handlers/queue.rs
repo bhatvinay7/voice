@@ -1,7 +1,9 @@
 use super::super::session::{PendingClientTranscript, SessionActor};
 use crate::models::*;
+use futures_util::FutureExt;
 use pubsub::SystemEvent;
 use serde_json::json;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 const INTERRUPTION_SPEECH_STATE_MAX_CHECKS: u8 = 5;
@@ -490,31 +492,47 @@ impl SessionActor {
                 if text.is_empty() {
                     return;
                 }
-                let pending =
-                    self.pending_client_transcript
-                        .get_or_insert(PendingClientTranscript {
-                            text: String::new(),
-                            language,
-                        });
-                if !pending.text.is_empty() {
-                    pending.text.push(' ');
-                }
-                pending.text.push_str(&text);
-                self.client_transcript_generation =
-                    self.client_transcript_generation.saturating_add(1);
-                let generation = self.client_transcript_generation;
-                let delay_ms = config::AppConfig::load()
-                    .unwrap_or_else(|_| config::AppConfig::load_default())
-                    .sts_text_jitter_ms;
+                let merged = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    let pending =
+                        self.pending_client_transcript
+                            .get_or_insert(PendingClientTranscript {
+                                text: String::new(),
+                                language,
+                            });
+                    if !pending.text.is_empty() {
+                        pending.text.push(' ');
+                    }
+                    pending.text.push_str(&text);
+                    self.client_transcript_generation =
+                        self.client_transcript_generation.saturating_add(1);
+                    let delay_ms = config::AppConfig::load()
+                        .unwrap_or_else(|_| config::AppConfig::load_default())
+                        .sts_text_jitter_ms;
+                    (self.client_transcript_generation, delay_ms)
+                }));
+                let (generation, delay_ms) = match merged {
+                    Ok(values) => values,
+                    Err(_) => {
+                        tracing::error!(session = %session_id, "client transcript debounce panicked; dropped incomplete client turn");
+                        return;
+                    }
+                };
                 let queue_tx = self.orch.queue_tx.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    let _ = queue_tx
-                        .send(QueueEvent::CommitClientTranscript {
-                            session_id,
-                            generation,
-                        })
-                        .await;
+                    let result = AssertUnwindSafe(async move {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        let _ = queue_tx
+                            .send(QueueEvent::CommitClientTranscript {
+                                session_id,
+                                generation,
+                            })
+                            .await;
+                    })
+                    .catch_unwind()
+                    .await;
+                    if result.is_err() {
+                        tracing::error!(generation, "client transcript debounce flush panicked");
+                    }
                 });
             }
 
