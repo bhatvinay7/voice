@@ -1042,10 +1042,13 @@ impl LlmAgentActor {
             };
         }
         let render = |template: &str| {
-            template
+            let prompt = template
                 .replace("__SYSTEM_PROMPT__", &cfg.agent_system_prompt)
                 .replace("__USER_QUESTION__", question)
-                .replace("__GRAPH_CONTEXT__", graph_context.unwrap_or("{}"))
+                .replace("__GRAPH_CONTEXT__", graph_context.unwrap_or("{}"));
+            format!(
+                "{prompt}\n\nCONTEXT CONTRACT: GRAPH_CONTEXT.memory is an actor-built, bounded session-memory packet. Use memory.active_subject and memory.latest_verified_result before inferring from node titles. memory.recent_turns contains full user, assistant, and verified tool content in chronological order. Prefer a context answer when these fields directly answer the current question; request a tool only when verified memory lacks the needed fact."
+            )
         };
         // Route with a tiny fast-model contract first, then use the narrow
         // event prompt. If routing is unavailable, general planning remains

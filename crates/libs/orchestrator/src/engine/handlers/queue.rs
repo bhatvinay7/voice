@@ -571,7 +571,12 @@ impl SessionActor {
                     tracing::debug!(requested = %session_id, owned = %self.session_id, "ignoring graph context request for another session");
                     return;
                 }
-                let context = self.read_graph_reference_context(&query_id, &node_ids, false);
+                // The first graph lookup is the fast planner's only chance to
+                // understand a follow-up.  Give it a bounded full component
+                // plus the LLM-oriented memory packet; follow-up lookups with
+                // explicit IDs stay narrow.
+                let context =
+                    self.read_graph_reference_context(&query_id, &node_ids, node_ids.is_empty());
                 let context = context.map(|context| {
                     let pending_tools = self.tasks.values().filter(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Retrying)).filter_map(|task| {
                         let source_query_id = task.query_id.clone()?;

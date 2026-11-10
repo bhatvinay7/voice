@@ -586,6 +586,7 @@ impl SessionActor {
             "query_id": query_id,
             "latest_user_node": snapshot_value["latest_user_node"].clone(),
             "latest_context_node": snapshot_value["latest_context_node"].clone(),
+            "memory": self.conversation_graph.memory_snapshot(16),
             "node_references": references,
             "relations": relations,
             "resolved_nodes": [],

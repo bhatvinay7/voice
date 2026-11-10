@@ -403,6 +403,87 @@ impl ConversationGraph {
         self.latest_context_node = None;
     }
 
+    /// Build a bounded, LLM-oriented memory view from the actor-owned graph.
+    ///
+    /// The graph remains the source of truth.  This view deliberately makes
+    /// the current subject, verified tool result, and recent conversational
+    /// turns explicit so callers do not need to infer them from raw topology
+    /// or a DashMap title alone.
+    pub fn memory_snapshot(&self, max_turns: usize) -> serde_json::Value {
+        let mut ordered = self.nodes.values().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| {
+            left.turn_id
+                .cmp(&right.turn_id)
+                .then_with(|| left.graph_version.cmp(&right.graph_version))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        let recent_nodes = ordered
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    ConversationNodeKind::UserText
+                        | ConversationNodeKind::AssistantResponse
+                        | ConversationNodeKind::ToolContext
+                )
+            })
+            .collect::<Vec<_>>();
+        let recent_start = recent_nodes.len().saturating_sub(max_turns);
+        let recent_turns = recent_nodes[recent_start..]
+            .iter()
+            .map(|node| {
+                serde_json::json!({
+                    "node_id": node.id,
+                    "kind": node.kind,
+                    "turn_id": node.turn_id,
+                    "content": node.content,
+                    "verified": node.kind == ConversationNodeKind::ToolContext,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let active_subject = ordered
+            .iter()
+            .rev()
+            .find(|node| {
+                matches!(
+                    node.kind,
+                    ConversationNodeKind::ToolContext | ConversationNodeKind::AssistantResponse
+                )
+            })
+            .map(|node| {
+                serde_json::json!({
+                    "node_id": node.id,
+                    "kind": node.kind,
+                    "turn_id": node.turn_id,
+                    "content": node.content,
+                    "verified": node.kind == ConversationNodeKind::ToolContext,
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
+
+        let latest_verified_result = ordered
+            .iter()
+            .rev()
+            .find(|node| node.kind == ConversationNodeKind::ToolContext)
+            .map(|node| {
+                serde_json::json!({
+                    "node_id": node.id,
+                    "turn_id": node.turn_id,
+                    "content": node.content,
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
+
+        serde_json::json!({
+            "active_subject": active_subject,
+            "latest_verified_result": latest_verified_result,
+            "recent_turns": recent_turns,
+            "instruction": "Use active_subject and latest_verified_result for pronouns, ordinals, and prior-discussion questions. ToolContext content is verified data; AssistantResponse content records what was said to the caller.",
+        })
+    }
+
     pub fn append_user_text(&mut self, text: &str) -> Option<String> {
         let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
         // Transcript sanitization already rejects noise. Keep valid short
