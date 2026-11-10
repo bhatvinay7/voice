@@ -1331,6 +1331,7 @@ impl LlmAgentActor {
                 graph_context.as_deref().unwrap_or("{}"),
             )
             .replace("__ASSISTANT_RESPONSE__", &response);
+        let prompt = format!("{prompt}\n\nReturn strict JSON only with this schema: {{\"schema_version\":1,\"topic_summary\":string|null,\"active_entity_id\":string|null,\"active_entity_ids\":[string],\"ordinal_map\":{{\"first\":\"entity-id\"}},\"follow_up_aliases\":{{\"it\":\"entity-id\"}},\"referenced_node_ids\":[\"graph-node-id\"],\"unresolved_intent\":string|null}}. Use only entity IDs and node IDs already present in GRAPH_CONTEXT. Never invent facts or identifiers.");
         let worker = LlmAgentActor::new(
             self.run_id.clone(),
             self.db.clone(),
@@ -2078,16 +2079,15 @@ impl LlmAgentActor {
                         )
                         .await;
 
-                        // Tool-result evaluation is a main-agent response
-                        // step. Do not send its prompt, raw result, or answer
-                        // to the graph-improver/RAG optimizer. The tool result
-                        // is already retained as a ToolContext node by the
-                        // SessionActor and remains available to later turns.
-                        tracing::info!(
-                            run = %run_id.0,
-                            task = %task_id.0,
-                            query_id = ?query_id,
-                            "main-agent evaluator result kept in graph; graph-improver input skipped"
+                        // Tool results are where result ordering and stable
+                        // entity IDs first appear. Enrich asynchronously after
+                        // the caller-facing response; the actor validates the
+                        // proposal before it can update working memory.
+                        self.schedule_graph_enrichment(
+                            query_id.clone(),
+                            user_question.clone(),
+                            graph_context.clone(),
+                            speech_text.clone(),
                         );
 
                         let _ = self

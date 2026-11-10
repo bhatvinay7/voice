@@ -586,6 +586,55 @@ impl SessionActor {
         self.session_memory = memory;
     }
 
+    /// Validate an LLM enrichment proposal against actor-owned evidence before
+    /// it is admitted to the graph. LLM output can suggest state but can never
+    /// invent a node or property/entity identity.
+    pub fn validate_graph_memory_enrichment(&mut self, raw: &str) -> Option<String> {
+        let raw = raw
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+        let proposal = serde_json::from_str::<workflow::GraphMemoryEnrichment>(raw).ok()?;
+        if proposal.schema_version != 1
+            || proposal
+                .topic_summary
+                .as_ref()
+                .is_some_and(|summary| summary.chars().count() > 600)
+            || proposal
+                .referenced_node_ids
+                .iter()
+                .any(|id| !self.conversation_graph.nodes.contains_key(id))
+        {
+            return None;
+        }
+        self.refresh_session_memory();
+        let valid_entities = self
+            .session_memory
+            .active_entity_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let entity_is_valid = |entity: &str| valid_entities.contains(&entity.to_string());
+        if proposal
+            .active_entity_id
+            .as_deref()
+            .is_some_and(|id| !entity_is_valid(id))
+            || proposal
+                .active_entity_ids
+                .iter()
+                .any(|id| !entity_is_valid(id))
+            || proposal.ordinal_map.values().any(|id| !entity_is_valid(id))
+            || proposal
+                .follow_up_aliases
+                .values()
+                .any(|id| !entity_is_valid(id))
+        {
+            return None;
+        }
+        serde_json::to_string(&proposal).ok()
+    }
+
     pub fn sync_graph_node_references(&self) {
         let live_ids: std::collections::BTreeSet<String> =
             self.conversation_graph.nodes.keys().cloned().collect();

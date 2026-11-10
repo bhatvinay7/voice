@@ -398,7 +398,30 @@ pub struct SessionMemory {
     pub selected_entity_id: Option<String>,
     pub ordinal_map: BTreeMap<String, String>,
     pub latest_verified_result_node_id: Option<String>,
+    pub topic_summary: Option<String>,
+    pub follow_up_aliases: BTreeMap<String, String>,
     pub recent_turns: Vec<SessionMemoryTurn>,
+}
+
+/// A background LLM's proposed memory update. It is intentionally data-only:
+/// the SessionActor validates every ID before the proposal can affect memory.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GraphMemoryEnrichment {
+    pub schema_version: u8,
+    #[serde(default)]
+    pub topic_summary: Option<String>,
+    #[serde(default)]
+    pub active_entity_id: Option<String>,
+    #[serde(default)]
+    pub active_entity_ids: Vec<String>,
+    #[serde(default)]
+    pub ordinal_map: BTreeMap<String, String>,
+    #[serde(default)]
+    pub follow_up_aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    pub referenced_node_ids: Vec<String>,
+    #[serde(default)]
+    pub unresolved_intent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,15 +491,52 @@ impl SessionMemory {
             })
             .collect();
 
-        Self {
+        let mut memory = Self {
             graph_version: graph.graph_version,
             active_topic,
             active_entity_ids,
             selected_entity_id,
             ordinal_map,
             latest_verified_result_node_id: latest_tool.map(|node| node.id.clone()),
+            topic_summary: None,
+            follow_up_aliases: BTreeMap::new(),
             recent_turns,
+        };
+        // Only actor-validated enrichments are written in the current schema.
+        // Older/free-form enrichment nodes simply do not parse and are ignored.
+        for node in nodes
+            .iter()
+            .filter(|node| node.kind == ConversationNodeKind::GraphEnrichment)
+        {
+            if let Ok(enrichment) = serde_json::from_str::<GraphMemoryEnrichment>(&node.content) {
+                if enrichment.schema_version == 1 {
+                    memory.apply_enrichment(enrichment);
+                }
+            }
         }
+        memory
+    }
+
+    pub fn apply_enrichment(&mut self, enrichment: GraphMemoryEnrichment) {
+        if enrichment.schema_version != 1 {
+            return;
+        }
+        if let Some(summary) = enrichment
+            .topic_summary
+            .filter(|summary| !summary.trim().is_empty())
+        {
+            self.topic_summary = Some(summary);
+        }
+        if let Some(selected) = enrichment.active_entity_id {
+            self.selected_entity_id = Some(selected);
+        }
+        if !enrichment.active_entity_ids.is_empty() {
+            self.active_entity_ids = enrichment.active_entity_ids;
+        }
+        if !enrichment.ordinal_map.is_empty() {
+            self.ordinal_map = enrichment.ordinal_map;
+        }
+        self.follow_up_aliases.extend(enrichment.follow_up_aliases);
     }
 }
 
