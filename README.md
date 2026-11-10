@@ -118,6 +118,14 @@ Turn-taking is server-authoritative. Browser transcript fragments are debounced 
 
 The background graph improver never writes memory directly. It proposes a typed JSON payload containing a topic summary, verified entity IDs, ordinal mappings, aliases, and graph references. The actor validates every proposed node and entity ID against the graph and verified tool data, discarding unknown or malformed fields before storing the proposal as an auditable graph node and rebuilding `SessionMemory`.
 
+### Runtime ownership and failure handling
+
+The runtime follows an actor pattern: the dispatcher routes every session-scoped `QueueEvent` to one `SessionActor`, and only that actor mutates its graph, memory, tasks, cancellation state, and recording lifecycle. Rust MPSC channels connect the dispatcher, STT/TTS workers, agent worker, control-plane tools, and delayed timers; broadcast channels fan transcript events to independent S3 and Redis subscribers. Bounded channels provide backpressure, while task-specific cancellation tokens and generation IDs prevent a late tool result, timer, or model response from taking over a newer caller turn.
+
+Panic boundaries isolate non-critical background work. The transcript debounce task catches failures before it can emit an incomplete turn, graph-memory refresh preserves the last valid `SessionMemory` if rebuilding fails, and the graph improver is detached from caller latency and submits only a validated proposal. A failed worker therefore logs and drops its own unit of work instead of crashing the session actor or mutating verified conversational state.
+
+For an AI follow-up such as “what was the price of the first one?”, the actor first reads `SessionMemory.ordinal_map` and the verified result-set IDs. It then resolves the exact graph/tool nodes and gives the main LLM a small, factual context packet. If deterministic memory cannot resolve the request, the fast LLM decides whether existing context is sufficient or a new tool call is required. This keeps the graph useful for provenance and recovery while making ordinary follow-up questions fast and reliable.
+
 ## Services
 
 | Service | Role |
