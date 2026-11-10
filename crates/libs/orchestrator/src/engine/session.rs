@@ -8,6 +8,12 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Clone)]
+pub struct PendingClientTranscript {
+    pub text: String,
+    pub language: String,
+}
+
 pub struct SessionActor {
     pub session_id: String,
     pub user_id: String,
@@ -43,6 +49,10 @@ pub struct SessionActor {
     /// When `Irrelevant` it is discarded from Redis (still in S3 via the
     /// S3 fanout subscriber which received it immediately).
     pub pending_user_turn: Option<String>,
+    /// Browser text can arrive as several final-looking packets. Keep it out
+    /// of the graph until the client has been quiet for the debounce window.
+    pub pending_client_transcript: Option<PendingClientTranscript>,
+    pub client_transcript_generation: u64,
     /// Session-local reactive ordering state. Worker tasks only return typed
     /// events to this mailbox.
     pub transcript_reorder: workflow::ReorderBuffer,
@@ -257,6 +267,8 @@ impl SessionActor {
             cancel_token: CancellationToken::new(),
             orch,
             pending_user_turn: None,
+            pending_client_transcript: None,
+            client_transcript_generation: 0,
             transcript_reorder: workflow::ReorderBuffer::new(
                 0,
                 Duration::from_millis(text_jitter_ms),
@@ -503,6 +515,8 @@ impl SessionActor {
         self.session_memory = workflow::SessionMemory::default();
         self.graph_node_references.clear();
         self.pending_user_turn = None;
+        self.pending_client_transcript = None;
+        self.client_transcript_generation = self.client_transcript_generation.saturating_add(1);
         self.pending_query_id = None;
         self.pending_query_text = None;
         self.pending_query_clean = None;
