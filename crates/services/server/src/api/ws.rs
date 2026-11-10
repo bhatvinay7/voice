@@ -59,12 +59,10 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
                         }),
                         "STT_TRANSCRIPT" => {
                             if let Some(transcript_text) = client_msg.text {
-                                Some(QueueEvent::SttTranscript {
+                                Some(QueueEvent::ClientTranscript {
                                     session_id,
                                     text: transcript_text,
                                     language: lang,
-                                    is_final: true,
-                                    noise: None, // Client-side STT: no acoustic noise profile.
                                 })
                             } else {
                                 eprintln!("[WS] STT_TRANSCRIPT message missing 'text' field for session {}", client_msg.session_id);

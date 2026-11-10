@@ -337,6 +337,8 @@ impl Orchestrator {
             QueueEvent::UserAudioChunk { session_id, .. } => Some(session_id.clone()),
             QueueEvent::TelephonyAudio { session_id, .. } => Some(session_id.clone()),
             QueueEvent::SttTranscript { session_id, .. } => Some(session_id.clone()),
+            QueueEvent::ClientTranscript { session_id, .. } => Some(session_id.clone()),
+            QueueEvent::CommitClientTranscript { session_id, .. } => Some(session_id.clone()),
             QueueEvent::TranscriptFragment { session_id, .. } => Some(session_id.clone()),
             QueueEvent::InterviewerSpeech { session_id, .. } => Some(session_id.clone()),
             QueueEvent::BargeInTrigger { session_id, .. } => Some(session_id.clone()),
@@ -396,6 +398,7 @@ impl Orchestrator {
                 QueueEvent::UserAudioChunk { .. }
                     | QueueEvent::TelephonyAudio { .. }
                     | QueueEvent::SttTranscript { .. }
+                    | QueueEvent::ClientTranscript { .. }
                     | QueueEvent::TranscriptFragment { .. }
                     | QueueEvent::StsEvent { .. }
             ) {
@@ -453,6 +456,7 @@ impl Orchestrator {
                     &event,
                     QueueEvent::SessionCancelled { .. }
                         | QueueEvent::CommitTranscript { .. }
+                        | QueueEvent::CommitClientTranscript { .. }
                         | QueueEvent::ScheduledTaskDue { .. }
                         | QueueEvent::Agent(
                             AgentEvent::Finished { .. } | AgentEvent::Failed { .. }

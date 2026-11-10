@@ -66,6 +66,17 @@ pub enum QueueEvent {
         /// Noise profile from the VAD analysis window for this utterance.
         noise: Option<crate::audio_gate::NoiseProfile>,
     },
+    /// Text submitted by a browser/client. The session actor combines nearby
+    /// messages into one completed turn before the fast LLM can see them.
+    ClientTranscript {
+        session_id: String,
+        text: String,
+        language: String,
+    },
+    CommitClientTranscript {
+        session_id: String,
+        generation: u64,
+    },
     /// Ordered/revision-aware transcript input for the reactive session graph.
     TranscriptFragment {
         session_id: String,

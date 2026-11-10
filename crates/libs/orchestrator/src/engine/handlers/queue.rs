@@ -1,4 +1,4 @@
-use super::super::session::SessionActor;
+use super::super::session::{PendingClientTranscript, SessionActor};
 use crate::models::*;
 use pubsub::SystemEvent;
 use serde_json::json;
@@ -479,6 +479,67 @@ impl SessionActor {
                         }
                     }
                 }
+            }
+
+            QueueEvent::ClientTranscript {
+                session_id,
+                text,
+                language,
+            } => {
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if text.is_empty() {
+                    return;
+                }
+                let pending =
+                    self.pending_client_transcript
+                        .get_or_insert(PendingClientTranscript {
+                            text: String::new(),
+                            language,
+                        });
+                if !pending.text.is_empty() {
+                    pending.text.push(' ');
+                }
+                pending.text.push_str(&text);
+                self.client_transcript_generation =
+                    self.client_transcript_generation.saturating_add(1);
+                let generation = self.client_transcript_generation;
+                let delay_ms = config::AppConfig::load()
+                    .unwrap_or_else(|_| config::AppConfig::load_default())
+                    .sts_text_jitter_ms;
+                let queue_tx = self.orch.queue_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    let _ = queue_tx
+                        .send(QueueEvent::CommitClientTranscript {
+                            session_id,
+                            generation,
+                        })
+                        .await;
+                });
+            }
+
+            QueueEvent::CommitClientTranscript {
+                session_id,
+                generation,
+            } => {
+                if generation != self.client_transcript_generation {
+                    return;
+                }
+                let Some(pending) = self.pending_client_transcript.take() else {
+                    return;
+                };
+                tracing::info!(session = %session_id, generation, transcript_chars = pending.text.chars().count(), "client transcript debounce settled; dispatching one complete turn");
+                let _ = self
+                    .orch
+                    .queue_tx
+                    .send(QueueEvent::SttTranscript {
+                        session_id,
+                        text: pending.text,
+                        language: pending.language,
+                        is_final: true,
+                        noise: None,
+                    })
+                    .await;
             }
 
             QueueEvent::TranscriptFragment {
