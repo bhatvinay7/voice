@@ -387,6 +387,147 @@ pub struct ConversationGraph {
     pub latest_context_node: Option<String>,
 }
 
+/// Compact, actor-owned working memory derived from the conversation graph.
+/// Unlike the graph this is optimized for deterministic follow-up resolution,
+/// not auditing every event and relationship.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionMemory {
+    pub graph_version: u64,
+    pub active_topic: Option<String>,
+    pub active_entity_ids: Vec<String>,
+    pub selected_entity_id: Option<String>,
+    pub ordinal_map: BTreeMap<String, String>,
+    pub latest_verified_result_node_id: Option<String>,
+    pub recent_turns: Vec<SessionMemoryTurn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMemoryTurn {
+    pub node_id: String,
+    pub kind: ConversationNodeKind,
+    pub turn_id: u64,
+    pub content: String,
+    pub verified: bool,
+}
+
+impl SessionMemory {
+    /// Rebuild deterministic working memory from graph events. This accepts
+    /// malformed or non-JSON tool payloads: they simply contribute no entity
+    /// IDs while still remaining available through the graph audit trail.
+    pub fn from_conversation_graph(graph: &ConversationGraph) -> Self {
+        let mut nodes = graph.nodes.values().collect::<Vec<_>>();
+        nodes.sort_by(|left, right| {
+            left.turn_id
+                .cmp(&right.turn_id)
+                .then_with(|| left.graph_version.cmp(&right.graph_version))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        let active_topic = nodes
+            .iter()
+            .rev()
+            .find(|node| node.kind == ConversationNodeKind::UserText)
+            .map(|node| node.content.clone());
+        let latest_tool = nodes
+            .iter()
+            .rev()
+            .find(|node| node.kind == ConversationNodeKind::ToolContext);
+        let mut active_entity_ids = latest_tool
+            .and_then(|node| serde_json::from_str::<serde_json::Value>(&node.content).ok())
+            .map(|value| extract_entity_ids(&value))
+            .unwrap_or_default();
+        let mut seen_entities = BTreeSet::new();
+        active_entity_ids.retain(|id| seen_entities.insert(id.clone()));
+
+        let ordinal_map = active_entity_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, id)| ordinal_name(index).map(|ordinal| (ordinal, id.clone())))
+            .collect::<BTreeMap<_, _>>();
+        let selected_entity_id = active_entity_ids.first().cloned();
+        let recent_nodes = nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    ConversationNodeKind::UserText
+                        | ConversationNodeKind::AssistantResponse
+                        | ConversationNodeKind::ToolContext
+                )
+            })
+            .collect::<Vec<_>>();
+        let recent_start = recent_nodes.len().saturating_sub(16);
+        let recent_turns = recent_nodes[recent_start..]
+            .iter()
+            .map(|node| SessionMemoryTurn {
+                node_id: node.id.clone(),
+                kind: node.kind.clone(),
+                turn_id: node.turn_id,
+                content: node.content.clone(),
+                verified: node.kind == ConversationNodeKind::ToolContext,
+            })
+            .collect();
+
+        Self {
+            graph_version: graph.graph_version,
+            active_topic,
+            active_entity_ids,
+            selected_entity_id,
+            ordinal_map,
+            latest_verified_result_node_id: latest_tool.map(|node| node.id.clone()),
+            recent_turns,
+        }
+    }
+}
+
+fn ordinal_name(index: usize) -> Option<String> {
+    const ORDINALS: [&str; 20] = [
+        "first",
+        "second",
+        "third",
+        "fourth",
+        "fifth",
+        "sixth",
+        "seventh",
+        "eighth",
+        "ninth",
+        "tenth",
+        "eleventh",
+        "twelfth",
+        "thirteenth",
+        "fourteenth",
+        "fifteenth",
+        "sixteenth",
+        "seventeenth",
+        "eighteenth",
+        "nineteenth",
+        "twentieth",
+    ];
+    ORDINALS.get(index).map(|value| (*value).to_string())
+}
+
+fn extract_entity_ids(value: &serde_json::Value) -> Vec<String> {
+    fn visit(value: &serde_json::Value, ids: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Array(values) => values.iter().for_each(|value| visit(value, ids)),
+            serde_json::Value::Object(values) => {
+                for key in ["listing_id", "property_id", "entity_id", "id"] {
+                    if let Some(value) = values.get(key).and_then(|value| value.as_str()) {
+                        if !value.trim().is_empty() {
+                            ids.push(value.trim().to_string());
+                        }
+                    }
+                }
+                values.values().for_each(|value| visit(value, ids));
+            }
+            _ => {}
+        }
+    }
+    let mut ids = Vec::new();
+    visit(value, &mut ids);
+    ids
+}
+
 impl ConversationGraph {
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {

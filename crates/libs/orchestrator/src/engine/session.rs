@@ -3,6 +3,7 @@ use crate::models::*;
 use dashmap::DashMap;
 use futures_util::FutureExt;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -21,6 +22,9 @@ pub struct SessionActor {
     /// It stores user text, optimized intent, tool context, and responses for
     /// the secondary response/reconstruction path.
     pub conversation_graph: workflow::ConversationGraph,
+    /// Small, mutable working memory owned by this actor.  The graph remains
+    /// the audit trail; this state is the deterministic follow-up resolver.
+    pub session_memory: workflow::SessionMemory,
     /// Session-local, graph-worker-owned index. Agent reads are served as
     /// lightweight references and then resolve exact nodes from this actor's
     /// conversation graph. Agent commands never receive mutation capability.
@@ -124,6 +128,14 @@ impl SessionActor {
             .sts_text_jitter_ms;
         let (conversation_tx, _) = tokio::sync::broadcast::channel::<ConversationEvent>(256);
         let agent_tx = (orch.agent_factory)(run_id.clone(), orch.queue_tx.clone());
+        let memory_key = format!("session:{}:memory", session_id);
+        let session_memory = orch
+            .local_db
+            .get(memory_key.as_bytes())
+            .ok()
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<workflow::SessionMemory>(&bytes).ok())
+            .unwrap_or_default();
 
         let (s3_tx, s3_rx) = mpsc::channel(1_000);
         let s_id = session_id.clone();
@@ -233,6 +245,7 @@ impl SessionActor {
             db_tasks: HashMap::new(),
             workflow_graph: None,
             conversation_graph: workflow::ConversationGraph::new(session_id.clone()),
+            session_memory,
             graph_node_references: DashMap::new(),
             agent_tx: Some(agent_tx),
             sts_tx,
@@ -487,6 +500,7 @@ impl SessionActor {
     pub fn clear_session_runtime_state(&mut self) {
         self.clear_llm_speaker_state();
         self.conversation_graph.reset();
+        self.session_memory = workflow::SessionMemory::default();
         self.graph_node_references.clear();
         self.pending_user_turn = None;
         self.pending_query_id = None;
@@ -530,6 +544,34 @@ impl SessionActor {
         tracing::info!(session = %self.session_id, "cleared SessionActor graph, DashMap references, and Sled session state");
     }
 
+    /// Refresh memory from the graph and persist it before handing context to
+    /// an LLM. A malformed tool payload or an unexpected panic must preserve
+    /// the previous valid memory rather than fail the SessionActor.
+    pub fn refresh_session_memory(&mut self) {
+        let graph = self.conversation_graph.clone();
+        let memory = match catch_unwind(AssertUnwindSafe(|| {
+            workflow::SessionMemory::from_conversation_graph(&graph)
+        })) {
+            Ok(memory) => memory,
+            Err(_) => {
+                tracing::error!(session = %self.session_id, "session memory refresh panicked; retaining previous memory");
+                return;
+            }
+        };
+        let key = format!("session:{}:memory", self.session_id);
+        match serde_json::to_vec(&memory) {
+            Ok(encoded) => {
+                if let Err(error) = self.orch.local_db.insert(key.as_bytes(), encoded) {
+                    tracing::warn!(session = %self.session_id, %error, "could not persist session memory to Sled");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(session = %self.session_id, %error, "could not serialize session memory");
+            }
+        }
+        self.session_memory = memory;
+    }
+
     pub fn sync_graph_node_references(&self) {
         let live_ids: std::collections::BTreeSet<String> =
             self.conversation_graph.nodes.keys().cloned().collect();
@@ -546,11 +588,12 @@ impl SessionActor {
     /// Read-only Agent context lookup. Selects references from the session
     /// DashMap, then resolves those references to bounded graph nodes.
     pub fn read_graph_reference_context(
-        &self,
+        &mut self,
         query_id: &str,
         requested_node_ids: &[String],
         include_connected_nodes: bool,
     ) -> Option<String> {
+        self.refresh_session_memory();
         self.sync_graph_node_references();
         let snapshot = self
             .conversation_graph
@@ -586,7 +629,7 @@ impl SessionActor {
             "query_id": query_id,
             "latest_user_node": snapshot_value["latest_user_node"].clone(),
             "latest_context_node": snapshot_value["latest_context_node"].clone(),
-            "memory": self.conversation_graph.memory_snapshot(16),
+            "memory": self.session_memory,
             "node_references": references,
             "relations": relations,
             "resolved_nodes": [],
@@ -702,7 +745,8 @@ impl SessionActor {
         Some(context.to_string())
     }
 
-    pub async fn publish_graph_state(&self) {
+    pub async fn publish_graph_state(&mut self) {
+        self.refresh_session_memory();
         self.sync_graph_node_references();
         let Some(user_id) = self.conversation_graph.latest_user_node.as_ref() else {
             return;
