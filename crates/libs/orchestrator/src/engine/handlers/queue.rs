@@ -689,6 +689,10 @@ impl SessionActor {
                 if session_id != self.session_id {
                     return;
                 }
+                let Some(enrichment) = self.validate_graph_memory_enrichment(&enrichment) else {
+                    tracing::warn!(session = %self.session_id, %query_id, "discarded invalid graph-memory enrichment proposal");
+                    return;
+                };
                 if self
                     .conversation_graph
                     .upsert_graph_enrichment_for_query(&query_id, base_graph_version, enrichment)
