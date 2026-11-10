@@ -4,11 +4,142 @@ use pubsub::SystemEvent;
 use serde_json::json;
 use std::time::Duration;
 
+const INTERRUPTION_SPEECH_STATE_MAX_CHECKS: u8 = 5;
+const INTERRUPTION_SPEECH_STATE_CHECK_DELAY: Duration = Duration::from_millis(150);
+
 impl SessionActor {
+    fn schedule_interruption_speech_state_check(
+        &self,
+        generation_id: u64,
+        attempt: u8,
+        consecutive_silent_checks: u8,
+    ) {
+        let queue_tx = self.orch.queue_tx.clone();
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(INTERRUPTION_SPEECH_STATE_CHECK_DELAY).await;
+            if let Err(error) = queue_tx
+                .send(QueueEvent::VerifyInterruptionSpeechState {
+                    session_id: session_id.clone(),
+                    generation_id,
+                    attempt,
+                    consecutive_silent_checks,
+                })
+                .await
+            {
+                tracing::error!(
+                    session = %session_id,
+                    generation_id,
+                    attempt,
+                    %error,
+                    "could not schedule interruption speech-state verification"
+                );
+            }
+        });
+    }
+
+    async fn resume_false_positive_interruption(&mut self, session_id: &str, generation_id: u64) {
+        self.pending_interruption_generation_id = None;
+        self.interruption_verification_generation_id = None;
+        self.interruption_verification_waiting_generation_id = None;
+        self.suppress_agent_response_until_next_user_turn = false;
+
+        let interruption = self
+            .conversation_graph
+            .nodes
+            .values()
+            .find(|node| {
+                node.kind == workflow::ConversationNodeKind::AssistantInterrupted
+                    && node
+                        .interruption_state
+                        .as_ref()
+                        .is_some_and(|state| state.generation_id == generation_id)
+            })
+            .and_then(|node| node.interruption_state.clone());
+        let Some(interruption) = interruption else {
+            self.set_llm_speaker_state(false, false);
+            tracing::warn!(
+                session = %session_id,
+                generation_id,
+                "false-positive interruption has no graph record; allowing active generation to finish"
+            );
+            return;
+        };
+
+        let query_is_current =
+            interruption
+                .query_node_id
+                .as_deref()
+                .map_or(true, |query_node_id| {
+                    self.conversation_graph.latest_user_node.as_deref() == Some(query_node_id)
+                });
+        if !query_is_current {
+            self.set_llm_speaker_state(true, false);
+            tracing::info!(
+                session = %session_id,
+                generation_id,
+                "not resuming false-positive interruption because its query was superseded"
+            );
+            return;
+        }
+
+        let Some(response_node_id) = interruption.response_node_id else {
+            self.set_llm_speaker_state(false, false);
+            tracing::info!(
+                session = %session_id,
+                generation_id,
+                response_ready = interruption.response_ready,
+                "false-positive interruption had no completed response; active model/tool work may finish normally"
+            );
+            return;
+        };
+        let Some(response_text) = self
+            .conversation_graph
+            .nodes
+            .get(&response_node_id)
+            .filter(|node| node.kind == workflow::ConversationNodeKind::AssistantResponse)
+            .map(|node| node.content.clone())
+        else {
+            self.set_llm_speaker_state(false, false);
+            tracing::warn!(
+                session = %session_id,
+                generation_id,
+                %response_node_id,
+                "interrupted response node is missing; active model/tool work may finish normally"
+            );
+            return;
+        };
+
+        if self
+            .conversation_graph
+            .mark_interruption_resumed(&response_node_id, generation_id)
+        {
+            self.publish_graph_state().await;
+        }
+        tracing::info!(
+            session = %session_id,
+            generation_id,
+            %response_node_id,
+            query_node_id = ?interruption.query_node_id.as_deref(),
+            fast_llm_active = self.fast_llm_active,
+            main_llm_active = true,
+            "resuming interrupted assistant response after bounded caller-silence verification"
+        );
+        self.active_speech_response_node_id = Some(response_node_id);
+        self.active_speech_query_node_id = interruption.query_node_id;
+        self.deferred_agent_response = None;
+        self.set_llm_speaker_state(false, true);
+        self.emit_ordered_speech(format!(
+            "I thought I heard an interruption, but we were discussing this, so I will continue. {response_text}"
+        ))
+        .await;
+    }
+
     pub async fn handle_queue_event(&mut self, event: QueueEvent) {
         match event {
             QueueEvent::SessionCancelled { session_id } => {
                 self.orch.phone_media.close(&session_id);
+                self.clear_session_runtime_state();
                 let deleted_key = format!("session:deleted:{}", session_id);
                 let _ = self
                     .orch
@@ -206,6 +337,11 @@ impl SessionActor {
                 user_id,
                 language,
             } => {
+                // Fast planning owns a new session until a validated main-agent
+                // answer is ready. This keeps the state deterministic instead
+                // of leaving both speaker flags unset between turns.
+                self.set_llm_speaker_state(true, false);
+                self.set_user_speaking(false);
                 self.user_id = user_id.clone();
                 let task_id = TaskId(format!("task-db-{}", session_id));
                 self.dispatch_db_action(
@@ -218,16 +354,6 @@ impl SessionActor {
                     false,
                 )
                 .await;
-            }
-
-            QueueEvent::UserAudioChunk {
-                session_id,
-                pcm_base64,
-                ..
-            } => {
-                let bytes = pcm_base64.into_bytes();
-                // Fan out to Tone Analysis and other parallel broadcast listeners.
-                let _ = self.audio_broadcast_tx.send((session_id.clone(), bytes));
             }
 
             QueueEvent::TelephonyAudio {
@@ -249,11 +375,6 @@ impl SessionActor {
                         tracing::warn!(%session_id, %error, "Could not enqueue phone audio for recording");
                     }
                 }
-                let bytes = samples
-                    .iter()
-                    .flat_map(|sample| sample.to_le_bytes())
-                    .collect::<Vec<_>>();
-                let _ = self.audio_broadcast_tx.send((session_id, bytes));
             }
 
             QueueEvent::SttTranscript {
@@ -300,7 +421,18 @@ impl SessionActor {
                                 }
                             }
                             CleanedInput::Text(clean) => {
+                                tracing::info!(
+                                        session = %session_id,
+                                        transcript_chars = text.chars().count(),
+                                        clean_chars = clean.chars().count(),
+                                        "accepted final STT transcript; scheduling agent dispatch"
+                                );
+                                // A final transcript is a new accepted turn.
+                                // Keep stale completions barred until the
+                                // generation token is handed to this turn.
                                 self.suppress_agent_response_until_next_user_turn = false;
+                                self.set_llm_speaker_state(true, false);
+                                self.set_user_speaking(false);
                                 // Persist a cleaned final user turn immediately.
                                 // Do not wait for a later tool/LLM response: an
                                 // interrupted call must still have a transcript.
@@ -428,15 +560,23 @@ impl SessionActor {
             QueueEvent::GraphContextRequested {
                 session_id,
                 query_id,
+                node_ids,
                 reply_to,
             } => {
                 // The expensive serialization is deliberately demand-only.
                 // Normal graph mutation, retries, and timeout events carry
                 // IDs/revisions only and never pass graph data through the
                 // orchestrator queue.
-                let context = self
-                    .conversation_graph
-                    .relevant_snapshot_json_for_query(&query_id);
+                if session_id != self.session_id {
+                    tracing::debug!(requested = %session_id, owned = %self.session_id, "ignoring graph context request for another session");
+                    return;
+                }
+                // The first graph lookup is the fast planner's only chance to
+                // understand a follow-up.  Give it a bounded full component
+                // plus the LLM-oriented memory packet; follow-up lookups with
+                // explicit IDs stay narrow.
+                let context =
+                    self.read_graph_reference_context(&query_id, &node_ids, node_ids.is_empty());
                 let context = context.map(|context| {
                     let pending_tools = self.tasks.values().filter(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Retrying)).filter_map(|task| {
                         let source_query_id = task.query_id.clone()?;
@@ -475,20 +615,44 @@ impl SessionActor {
                     .upsert_graph_enrichment_for_query(&query_id, base_graph_version, enrichment)
                     .is_some()
                 {
+                    tracing::info!(
+                        session = %self.session_id,
+                        %query_id,
+                        base_graph_version,
+                        graph_version = self.conversation_graph.graph_version,
+                        node_count = self.conversation_graph.nodes.len(),
+                        "graph improver worker applied enrichment"
+                    );
                     self.publish_graph_state().await;
                 } else {
-                    tracing::debug!(session = %self.session_id, %query_id, base_graph_version, current_graph_version = self.conversation_graph.graph_version, "discarding stale graph enrichment");
+                    tracing::warn!(
+                        session = %self.session_id,
+                        %query_id,
+                        base_graph_version,
+                        current_graph_version = self.conversation_graph.graph_version,
+                        "graph improver worker result discarded as stale"
+                    );
                 }
             }
 
             QueueEvent::CommitTranscript { query_id, .. } => {
                 if self.pending_query_id.as_deref() != Some(query_id.as_str()) {
+                    tracing::warn!(
+                        session = %self.session_id,
+                        %query_id,
+                        pending_query_id = ?self.pending_query_id,
+                        "commit transcript ignored because its query is no longer pending"
+                    );
                     return;
                 }
                 // Final transcript is authoritative evidence of a new caller
                 // turn. Stop any old STS response before fast planning turn
-                // two, but deliberately preserve pending tools so the planner
-                // can relate/reuse them through the graph.
+                // two, but preserve pending tools and model requests. The
+                // planner can relate tools through the graph, while query and
+                // generation checks determine whether old output is still valid.
+                self.suppress_agent_response_until_next_user_turn = false;
+                self.set_user_speaking(false);
+                self.deferred_agent_response = None;
                 if !self.sts_idle.load(std::sync::atomic::Ordering::SeqCst) {
                     if let Some(sts_tx) = &self.sts_tx {
                         if let Err(tokio::sync::mpsc::error::TrySendError::Full(stop)) =
@@ -504,15 +668,9 @@ impl SessionActor {
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                     self.output_sequencer
                         .cancel_generation(self.speech_turn_id, self.speech_generation_id);
-                    self.cancel_active_generation_work().await;
                     let timestamp_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                    if self
-                        .conversation_graph
-                        .append_assistant_interrupted(self.speech_generation_id, timestamp_ms)
-                        .is_some()
-                    {
-                        self.publish_graph_state().await;
-                    }
+                    self.record_speech_interruption(self.speech_generation_id, timestamp_ms)
+                        .await;
                 }
                 let Some(text) = self.pending_query_text.take() else {
                     return;
@@ -524,6 +682,7 @@ impl SessionActor {
                 let noise = self.pending_query_noise.take();
                 self.pending_query_id = None;
                 self.pending_query_started_at = None;
+                self.set_llm_speaker_state(true, false);
                 if let Some(agent_tx) = &self.agent_tx {
                     if let Err(error) = agent_tx
                         .send(AgentCmd::SetGraphQuery {
@@ -551,6 +710,12 @@ impl SessionActor {
                     } else {
                         tracing::info!(session = %self.session_id, query_id = %query_id, "final transcript dispatched to agent");
                     }
+                } else {
+                    tracing::error!(
+                        session = %self.session_id,
+                        %query_id,
+                        "final transcript could not be dispatched because the agent channel is unavailable"
+                    );
                 }
             }
 
@@ -736,9 +901,10 @@ impl SessionActor {
                 timestamp_ms,
             } => {
                 self.suppress_agent_response_until_next_user_turn = true;
-                // Clear transport queues first. Waiting on an agent mailbox or
-                // a slow tool cancellation lets already-buffered speech leak
-                // through after the caller has started talking.
+                self.set_llm_speaker_state(true, false);
+                self.set_user_speaking(true);
+                // Clear transport queues first so already-buffered speech
+                // cannot leak through after the caller starts talking.
                 if let Some(sts_tx) = &self.sts_tx {
                     if let Err(tokio::sync::mpsc::error::TrySendError::Full(stop)) =
                         sts_tx.try_send(crate::models::StsPipelineCmd::Stop)
@@ -751,14 +917,8 @@ impl SessionActor {
                 }
                 self.output_sequencer
                     .cancel_generation(self.speech_turn_id, self.speech_generation_id);
-                self.cancel_active_generation_work().await;
-                if self
-                    .conversation_graph
-                    .append_assistant_interrupted(self.speech_generation_id, timestamp_ms)
-                    .is_some()
-                {
-                    self.publish_graph_state().await;
-                }
+                self.record_speech_interruption(self.speech_generation_id, timestamp_ms)
+                    .await;
                 if !session_id.starts_with("phone:") {
                     let _ = self.orch.pubsub.publish(SystemEvent::VoiceBargeIn {
                         call_id: session_id,
@@ -775,38 +935,147 @@ impl SessionActor {
                 self.handle_agent_event(agent_event).await;
             }
 
+            QueueEvent::VerifyInterruptionSpeechState {
+                session_id,
+                generation_id,
+                attempt,
+                consecutive_silent_checks,
+            } => {
+                if self.interruption_verification_generation_id != Some(generation_id)
+                    || self.pending_interruption_generation_id != Some(generation_id)
+                {
+                    tracing::debug!(
+                        session = %session_id,
+                        generation_id,
+                        attempt,
+                        "discarding stale interruption speech-state check"
+                    );
+                    return;
+                }
+                if self.pending_query_id.is_some() {
+                    self.interruption_verification_generation_id = None;
+                    self.interruption_verification_waiting_generation_id = None;
+                    tracing::info!(
+                        session = %session_id,
+                        generation_id,
+                        attempt,
+                        "interruption recovery stopped because a user query is pending"
+                    );
+                    return;
+                }
+
+                let consecutive_silent_checks = if self.user_speaking {
+                    0
+                } else {
+                    consecutive_silent_checks.saturating_add(1)
+                };
+                tracing::info!(
+                    session = %session_id,
+                    generation_id,
+                    attempt,
+                    max_checks = INTERRUPTION_SPEECH_STATE_MAX_CHECKS,
+                    user_speaking = self.user_speaking,
+                    fast_llm_active = self.fast_llm_active,
+                    consecutive_silent_checks,
+                    "orchestrator checked caller speech state for interruption recovery"
+                );
+
+                if consecutive_silent_checks >= 2 {
+                    self.interruption_verification_generation_id = None;
+                    self.set_user_speaking(false);
+                    self.resume_false_positive_interruption(&session_id, generation_id)
+                        .await;
+                } else if attempt >= INTERRUPTION_SPEECH_STATE_MAX_CHECKS {
+                    self.interruption_verification_generation_id = None;
+                    if self.user_speaking {
+                        self.interruption_verification_waiting_generation_id = Some(generation_id);
+                        tracing::warn!(
+                            session = %session_id,
+                            generation_id,
+                            attempt,
+                            "caller still appears to be speaking after the verification limit; waiting for a later silence event before retrying"
+                        );
+                    } else {
+                        self.interruption_verification_waiting_generation_id = None;
+                        self.set_user_speaking(false);
+                        self.resume_false_positive_interruption(&session_id, generation_id)
+                            .await;
+                    }
+                } else {
+                    self.schedule_interruption_speech_state_check(
+                        generation_id,
+                        attempt.saturating_add(1),
+                        consecutive_silent_checks,
+                    );
+                }
+            }
+
             QueueEvent::StsEvent { session_id, event } => {
                 match event {
-                    StsPipelineEvent::UserSpeechStarted => {
-                        // This event is emitted only after the human-speech
-                        // VAD gate has opened. Preempt audio immediately so
-                        // old STS chunks cannot reach the caller while their
-                        // new utterance is still being transcribed/planned.
-                        // Do not cancel tools: fast planning decides their
-                        // relationship after the final transcript exists.
-                        if !self.sts_idle.load(std::sync::atomic::Ordering::SeqCst) {
-                            if let Some(sts_tx) = &self.sts_tx {
-                                if let Err(tokio::sync::mpsc::error::TrySendError::Full(stop)) =
-                                    sts_tx.try_send(crate::models::StsPipelineCmd::Stop)
-                                {
-                                    let retry_tx = sts_tx.clone();
-                                    tokio::spawn(async move {
-                                        let _ = retry_tx.send(stop).await;
-                                    });
-                                }
+                    StsPipelineEvent::UserSpeechEnded => {
+                        self.set_user_speaking(false);
+                        tracing::info!(
+                            session = %session_id,
+                            "caller silence observed; waiting for transcript verification before resuming interrupted output"
+                        );
+                        if let Some(generation_id) =
+                            self.interruption_verification_waiting_generation_id
+                        {
+                            if self.pending_interruption_generation_id == Some(generation_id)
+                                && self.pending_query_id.is_none()
+                                && self.interruption_verification_generation_id.is_none()
+                            {
+                                self.interruption_verification_waiting_generation_id = None;
+                                self.interruption_verification_generation_id = Some(generation_id);
+                                self.schedule_interruption_speech_state_check(generation_id, 1, 0);
                             }
-                            self.sts_idle
-                                .store(true, std::sync::atomic::Ordering::SeqCst);
-                            self.output_sequencer
-                                .cancel_generation(self.speech_turn_id, self.speech_generation_id);
-                            self.cancel_active_generation_work().await;
-                            tracing::info!(session = %session_id, "validated user speech preempted active STS playback before fast planning");
                         }
                     }
-                    StsPipelineEvent::BargeIn => {
+                    StsPipelineEvent::InterruptionFalsePositive => {
+                        tracing::info!(
+                            session = %session_id,
+                            user_speaking = self.user_speaking,
+                            fast_llm_active = self.fast_llm_active,
+                            main_llm_active = self.main_llm_active,
+                            pending_query = self.pending_query_id.is_some(),
+                            pending_interruption = self.pending_interruption_generation_id.is_some(),
+                            "received false-positive interruption verdict"
+                        );
+                        if self.pending_query_id.is_some() {
+                            tracing::info!(
+                                session = %session_id,
+                                "ignoring false-positive interruption verdict because a finalized user query is pending"
+                            );
+                            return;
+                        }
+                        let Some(generation_id) = self.pending_interruption_generation_id else {
+                            tracing::debug!(
+                                session = %session_id,
+                                "ignoring false-positive interruption verdict without a pending interruption"
+                            );
+                            return;
+                        };
+                        if self.interruption_verification_generation_id == Some(generation_id) {
+                            tracing::debug!(
+                                session = %session_id,
+                                generation_id,
+                                "false-positive interruption verification is already scheduled"
+                            );
+                            return;
+                        }
+                        self.interruption_verification_waiting_generation_id = None;
+                        self.interruption_verification_generation_id = Some(generation_id);
+                        self.schedule_interruption_speech_state_check(generation_id, 1, 0);
+                    }
+                    StsPipelineEvent::UserSpeechStarted => {
+                        // VAD may open while the main/fast model is processing,
+                        // not only while STS audio is already playing. Always
+                        // revoke main-agent speech output as soon as validated
+                        // user speech starts; generation/tool work continues.
+                        // A later query can supersede its output without cancelling it.
                         self.suppress_agent_response_until_next_user_turn = true;
-                        // Priority order is intentional: clear STS/TTS before
-                        // awaiting cancellation or graph persistence.
+                        self.set_llm_speaker_state(true, false);
+                        self.set_user_speaking(true);
                         if let Some(sts_tx) = &self.sts_tx {
                             if let Err(tokio::sync::mpsc::error::TrySendError::Full(stop)) =
                                 sts_tx.try_send(crate::models::StsPipelineCmd::Stop)
@@ -821,15 +1090,34 @@ impl SessionActor {
                             .store(true, std::sync::atomic::Ordering::SeqCst);
                         self.output_sequencer
                             .cancel_generation(self.speech_turn_id, self.speech_generation_id);
-                        self.cancel_active_generation_work().await;
                         let timestamp_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                        if self
-                            .conversation_graph
-                            .append_assistant_interrupted(self.speech_generation_id, timestamp_ms)
-                            .is_some()
-                        {
-                            self.publish_graph_state().await;
+                        self.record_speech_interruption(self.speech_generation_id, timestamp_ms)
+                            .await;
+                        tracing::info!(session = %session_id, "validated user speech preempted STS; active generation and pending tools continue until the user turn is finalized");
+                    }
+                    StsPipelineEvent::BargeIn => {
+                        self.suppress_agent_response_until_next_user_turn = true;
+                        self.set_llm_speaker_state(true, false);
+                        self.set_user_speaking(true);
+                        // Priority order is intentional: clear STS/TTS before
+                        // persisting the interruption in the graph.
+                        if let Some(sts_tx) = &self.sts_tx {
+                            if let Err(tokio::sync::mpsc::error::TrySendError::Full(stop)) =
+                                sts_tx.try_send(crate::models::StsPipelineCmd::Stop)
+                            {
+                                let retry_tx = sts_tx.clone();
+                                tokio::spawn(async move {
+                                    let _ = retry_tx.send(stop).await;
+                                });
+                            }
                         }
+                        self.sts_idle
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        self.output_sequencer
+                            .cancel_generation(self.speech_turn_id, self.speech_generation_id);
+                        let timestamp_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                        self.record_speech_interruption(self.speech_generation_id, timestamp_ms)
+                            .await;
                     }
                     StsPipelineEvent::UserTranscriptChunk {
                         text,
@@ -846,7 +1134,10 @@ impl SessionActor {
                         );
 
                         if is_final {
+                            self.set_user_speaking(false);
+                            let last_partial_at = self.last_sts_partial_at.take();
                             let trimmed = text.trim();
+                            let cleaned = sanitize_transcript(&text);
                             let now = std::time::Instant::now();
                             let is_dup = if let Some((ref prev_text, ref prev_time)) =
                                 self.last_user_transcript
@@ -862,36 +1153,102 @@ impl SessionActor {
                                 "[SessionActor {}] Deduplicated identical user transcript within 2s window: '{}'",
                                 session_id, trimmed
                             );
+                                if !matches!(&cleaned, CleanedInput::Empty) {
+                                    self.pending_interruption_generation_id = None;
+                                    self.interruption_verification_generation_id = None;
+                                    self.interruption_verification_waiting_generation_id = None;
+                                    self.deferred_agent_response = None;
+                                }
                             } else {
                                 self.last_user_transcript = Some((trimmed.to_string(), now));
                                 self.pending_user_turn = Some(text.clone());
                                 if self.ai_listen_muted {
-                                    println!(
-                                    "[SessionActor {}] AI is muted/paused. Discarding user transcript: {}",
-                                    session_id, text
-                                );
+                                    if !matches!(&cleaned, CleanedInput::Empty) {
+                                        self.pending_interruption_generation_id = None;
+                                        self.interruption_verification_generation_id = None;
+                                        self.interruption_verification_waiting_generation_id = None;
+                                        self.deferred_agent_response = None;
+                                    }
+                                    tracing::warn!(
+                                        session = %session_id,
+                                        transcript = %trimmed,
+                                        "final user transcript discarded because AI listening is muted"
+                                    );
                                 } else {
-                                    match sanitize_transcript(&text) {
+                                    match cleaned {
                                         CleanedInput::Empty => {
                                             tracing::info!(
                                                 "[SessionActor {}] STS transcript is noise-only — skipping LLM: '{}'",
                                                 session_id, text
                                             );
                                             // S3 already written above; skip Redis + LLM.
+                                            if self.pending_interruption_generation_id.is_some() {
+                                                if let Err(error) = self
+                                                    .orch
+                                                    .queue_tx
+                                                    .send(QueueEvent::StsEvent {
+                                                        session_id: session_id.clone(),
+                                                        event: StsPipelineEvent::InterruptionFalsePositive,
+                                                    })
+                                                    .await
+                                                {
+                                                    tracing::error!(
+                                                        session = %session_id,
+                                                        %error,
+                                                        "could not schedule false-positive interruption recovery"
+                                                    );
+                                                }
+                                            }
                                         }
                                         CleanedInput::Continuation(kind) => {
+                                            self.deferred_agent_response = None;
+                                            self.pending_interruption_generation_id = None;
+                                            self.interruption_verification_generation_id = None;
+                                            self.interruption_verification_waiting_generation_id =
+                                                None;
+                                            self.active_speech_response_node_id = None;
+                                            self.active_speech_query_node_id = None;
+                                            self.suppress_agent_response_until_next_user_turn =
+                                                false;
+                                            self.set_llm_speaker_state(true, false);
                                             if let Some(agent_tx) = &self.agent_tx {
-                                                let _ = agent_tx
+                                                if let Err(error) = agent_tx
                                                     .send(crate::models::AgentCmd::ContinueLast {
                                                         run_id: self.run_id.clone(),
                                                         kind,
                                                     })
-                                                    .await;
+                                                    .await
+                                                {
+                                                    tracing::error!(
+                                                        session = %session_id,
+                                                        %error,
+                                                        "continuation transcript could not be dispatched to agent"
+                                                    );
+                                                }
+                                            } else {
+                                                tracing::error!(
+                                                    session = %session_id,
+                                                    "continuation transcript dropped because the agent channel is unavailable"
+                                                );
                                             }
                                         }
                                         CleanedInput::Text(clean) => {
+                                            tracing::info!(
+                                                session = %session_id,
+                                                transcript_chars = text.chars().count(),
+                                                clean_chars = clean.chars().count(),
+                                                "accepted final STS transcript; scheduling agent dispatch"
+                                            );
                                             self.suppress_agent_response_until_next_user_turn =
                                                 false;
+                                            self.deferred_agent_response = None;
+                                            self.pending_interruption_generation_id = None;
+                                            self.interruption_verification_generation_id = None;
+                                            self.interruption_verification_waiting_generation_id =
+                                                None;
+                                            self.active_speech_response_node_id = None;
+                                            self.active_speech_query_node_id = None;
+                                            self.set_llm_speaker_state(true, false);
                                             self.publish_conversation_with_relevance(
                                                 "USER_PROMPT",
                                                 serde_json::json!({ "text": clean, "role": "user", "final": true }).to_string(),
@@ -926,14 +1283,19 @@ impl SessionActor {
                                                 let cfg = config::AppConfig::load().unwrap_or_else(
                                                     |_| config::AppConfig::load_default(),
                                                 );
-                                                let delay_ms = cfg
-                                                    .sts_text_jitter_ms
-                                                    .min(cfg.sts_text_max_wait_ms.max(1));
+                                                let debounce = Duration::from_millis(
+                                                    cfg.sts_text_jitter_ms
+                                                        .min(cfg.sts_text_max_wait_ms.max(1)),
+                                                );
+                                                // This is a true debounce, not a fixed delay:
+                                                // every partial ASR update resets the quiet
+                                                // window. The fast planner receives only this
+                                                // final, settled transcript and never a fragment.
+                                                let delay = last_partial_at
+                                                    .map(|at| debounce.saturating_sub(at.elapsed()))
+                                                    .unwrap_or(debounce);
                                                 tokio::spawn(async move {
-                                                    tokio::time::sleep(Duration::from_millis(
-                                                        delay_ms,
-                                                    ))
-                                                    .await;
+                                                    tokio::time::sleep(delay).await;
                                                     let _ = queue_tx
                                                         .send(QueueEvent::CommitTranscript {
                                                             session_id: session_for_commit,
@@ -946,6 +1308,16 @@ impl SessionActor {
                                     }
                                 }
                             }
+                        } else {
+                            // Partials are transport-only evidence. Keep them
+                            // out of the agent/tool path and move the debounce
+                            // deadline forward until the caller stops speaking.
+                            self.last_sts_partial_at = Some(std::time::Instant::now());
+                            tracing::debug!(
+                                session = %session_id,
+                                transcript_chars = text.chars().count(),
+                                "received partial STT transcript; reset fast-planner debounce"
+                            );
                         }
                     }
                     StsPipelineEvent::AiTranscriptChunk { text } => {
@@ -957,9 +1329,17 @@ impl SessionActor {
                         tracing::debug!(%session_id, %text, "STS assistant transcript received");
                     }
                     StsPipelineEvent::AudioComplete => {
+                        // The completed answer no longer owns the transport;
+                        // fast planning owns the next turn until main-agent
+                        // output is explicitly authorized.
+                        self.set_llm_speaker_state(true, false);
                         self.sts_idle
                             .store(true, std::sync::atomic::Ordering::SeqCst);
-                        let _ = self.conversation_graph.mark_latest_response_spoken();
+                        if self.conversation_graph.mark_latest_response_spoken() {
+                            self.publish_graph_state().await;
+                        }
+                        self.active_speech_response_node_id = None;
+                        self.active_speech_query_node_id = None;
                         let sts_task_id = TaskId(format!("sts-{}", session_id));
                         if self.clear_timeout(&sts_task_id) {
                             if let Some(task) = self.tasks.get_mut(&sts_task_id) {
@@ -968,6 +1348,7 @@ impl SessionActor {
                         }
                     }
                     StsPipelineEvent::Error(error) => {
+                        self.set_llm_speaker_state(true, false);
                         self.sts_idle
                             .store(true, std::sync::atomic::Ordering::SeqCst);
                         tracing::error!(

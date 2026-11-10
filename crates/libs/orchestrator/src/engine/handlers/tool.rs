@@ -176,43 +176,53 @@ impl SessionActor {
                         .as_ref()
                         .and_then(|node_id| self.conversation_graph.nodes.get(node_id))
                         .map(|node| node.event_id.clone());
-                    let release = latest_query_id.as_ref().and_then(|latest_query_id| {
-                        let terminal_queries = self
-                            .tasks
-                            .values()
-                            .filter(|task| {
-                                matches!(
-                                    task.status,
-                                    TaskStatus::Succeeded
-                                        | TaskStatus::Failed
-                                        | TaskStatus::TimedOut
-                                        | TaskStatus::Cancelled
-                                )
+                    let release = if self.suppress_agent_response_until_next_user_turn {
+                        tracing::info!(
+                            session = %self.session_id,
+                            task = %task_id.0,
+                            "tool result retained in graph; caller response suppressed until the next accepted user turn"
+                        );
+                        None
+                    } else {
+                        latest_query_id.as_ref().and_then(|latest_query_id| {
+                            let terminal_queries = self
+                                .tasks
+                                .values()
+                                .filter(|task| {
+                                    matches!(
+                                        task.status,
+                                        TaskStatus::Succeeded
+                                            | TaskStatus::Failed
+                                            | TaskStatus::TimedOut
+                                            | TaskStatus::Cancelled
+                                    )
+                                })
+                                .filter_map(|task| task.query_id.clone())
+                                .collect::<std::collections::BTreeSet<_>>();
+                            self.tasks.values_mut().find_map(|task| {
+                                let targets_latest = task.query_id.as_deref()
+                                    == Some(latest_query_id)
+                                    || task.dependent_query_ids.contains(latest_query_id);
+                                let gate_open = task
+                                    .required_query_ids
+                                    .iter()
+                                    .all(|dependency| terminal_queries.contains(dependency));
+                                if targets_latest && gate_open && !task.answer_released {
+                                    let output = task.completed_output.clone()?;
+                                    task.answer_released = true;
+                                    Some((
+                                        task.task_id.clone(),
+                                        task.run_id.clone(),
+                                        task.query_node_id.clone(),
+                                        output,
+                                        task.query_id.as_deref() != Some(latest_query_id),
+                                    ))
+                                } else {
+                                    None
+                                }
                             })
-                            .filter_map(|task| task.query_id.clone())
-                            .collect::<std::collections::BTreeSet<_>>();
-                        self.tasks.values_mut().find_map(|task| {
-                            let targets_latest = task.query_id.as_deref() == Some(latest_query_id)
-                                || task.dependent_query_ids.contains(latest_query_id);
-                            let gate_open = task
-                                .required_query_ids
-                                .iter()
-                                .all(|dependency| terminal_queries.contains(dependency));
-                            if targets_latest && gate_open && !task.answer_released {
-                                let output = task.completed_output.clone()?;
-                                task.answer_released = true;
-                                Some((
-                                    task.task_id.clone(),
-                                    task.run_id.clone(),
-                                    task.query_node_id.clone(),
-                                    output,
-                                    task.query_id.as_deref() != Some(latest_query_id),
-                                ))
-                            } else {
-                                None
-                            }
                         })
-                    });
+                    };
                     if let Some((
                         release_task_id,
                         release_run_id,
@@ -236,11 +246,12 @@ impl SessionActor {
                             target_node_id
                                 .and_then(|node_id| self.conversation_graph.nodes.get(node_id))
                                 .and_then(|node| {
-                                    self.conversation_graph
-                                        .relevant_snapshot_json_for_query(&node.event_id)
+                                    self.read_graph_reference_context(&node.event_id, &[], true)
                                 })
                         });
-                        if let Some(tx) = &self.agent_tx {
+                        let agent_tx = self.agent_tx.clone();
+                        if let Some(tx) = agent_tx {
+                            self.set_llm_speaker_state(false, true);
                             let _ = tx
                                 .send(AgentCmd::ToolResult {
                                     run_id: release_run_id,
@@ -258,6 +269,9 @@ impl SessionActor {
                             task = %task_id.0,
                             ?query_node_id,
                             latest_query = ?self.conversation_graph.latest_user_node,
+                            fast_llm_active = self.fast_llm_active,
+                            main_llm_active = self.main_llm_active,
+                            gate_reason = "task_is_not_the_latest_query_and_has_no_release_dependency",
                             "tool result retained in graph; main-agent answer gate remains closed"
                         );
                     }
@@ -442,10 +456,12 @@ impl SessionActor {
                             .as_ref()
                             .and_then(|id| self.conversation_graph.nodes.get(id))
                             .map(|node| node.content.clone());
-                        let graph_context = latest_query_id.as_ref().and_then(|id| {
-                            self.conversation_graph.relevant_snapshot_json_for_query(id)
-                        });
-                        if let Some(tx) = &self.agent_tx {
+                        let graph_context = latest_query_id
+                            .as_ref()
+                            .and_then(|id| self.read_graph_reference_context(id, &[], true));
+                        let agent_tx = self.agent_tx.clone();
+                        if let Some(tx) = agent_tx {
+                            self.set_llm_speaker_state(false, true);
                             let _ = tx
                                 .send(AgentCmd::ToolResult {
                                     run_id: release_run_id,

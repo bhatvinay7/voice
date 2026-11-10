@@ -31,6 +31,12 @@ pub async fn execute_tool(
 
     let rpc_result = tokio::select! {
         _ = cancellation.cancelled() => {
+            tracing::info!(
+                session_run = %run_id,
+                task = %task_id.0,
+                tool = %tool_name,
+                "tool RPC cancellation token fired"
+            );
             let _ = q_tx.send(QueueEvent::Tool(ToolEvent::Failed {
                 task_id,
                 attempt,

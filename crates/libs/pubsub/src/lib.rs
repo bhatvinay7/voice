@@ -101,49 +101,5 @@ impl SystemEvent {
 }
 
 #[cfg(test)]
-mod phone_isolation_tests {
-    use super::*;
-    #[test]
-    fn phone_payloads_never_reach_browser_subscribers() {
-        let bus = PubSubBus::new(10);
-        let mut browser = bus.subscribe();
-        for id in [
-            "phone:twilio:CA123",
-            "phone:telnyx:123",
-            "phone:vonage:123",
-            "phone:plivo:123",
-            "phone:sip:123",
-            "phone:custom:123",
-        ] {
-            assert_eq!(
-                bus.publish(SystemEvent::VoiceTtsStream {
-                    call_id: id.into(),
-                    audio_chunk_base64: "private".into(),
-                    index: 0,
-                    is_end: true,
-                })
-                .unwrap(),
-                0
-            );
-            assert_eq!(
-                bus.publish(SystemEvent::AuditEvent {
-                    call_id: Some(id.into()),
-                    event_type: "private".into(),
-                    payload: serde_json::json!({}),
-                    timestamp: String::new(),
-                })
-                .unwrap(),
-                0
-            );
-        }
-        assert!(browser.try_recv().is_err());
-        bus.publish(SystemEvent::VoiceTtsStream {
-            call_id: "web-123".into(),
-            audio_chunk_base64: "web".into(),
-            index: 0,
-            is_end: true,
-        })
-        .unwrap();
-        assert_eq!(browser.try_recv().unwrap().call_id(), Some("web-123"));
-    }
-}
+#[path = "../../../../tests/pubsub_pubsub_lib_phone_isolation_tests_1.rs"]
+mod phone_isolation_tests;
