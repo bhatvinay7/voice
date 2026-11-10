@@ -91,6 +91,33 @@ clears only in-memory run state and never removes the durable admin graph.
 
 User and assistant PCM frames are collected alongside the live call. Each call owns a Rust broadcast channel: the S3 subscriber writes `transcript.txt` beside the stereo 16 kHz WAV, while the Redis subscriber writes the same events to a stream named exactly after the session. Redis conversation streams have no TTL. The conversation worker reads the Redis stream, commits events to Neon idempotently, then deletes the Redis stream only after that commit succeeds. S3 is an archive and is never used to update Neon. Each agent actor has its own MPSC Redis-poll worker and delay queue, so it can refresh session context without blocking its command loop.
 
+## Context, memory, and turn-taking
+
+The conversation graph is the immutable, session-scoped evidence trail: it records caller turns, verified tool results, assistant responses, interruptions, and their links. `SessionActor` owns this graph and is the only component that can mutate it. The DashMap is a lightweight reference index for actor-safe lookups; it is not the source of truth and does not replace graph bodies.
+
+`SessionMemory` is the bounded working-memory layer derived from verified graph events and persisted in Sled for the active session. It carries the active topic, verified result-set entity IDs, ordinal mappings such as `first → listing-id`, selected entity, aliases such as `it`, and recent turn summaries. It is cleared with the session. Deterministic memory lookup handles obvious follow-ups before LLM reasoning; the main model receives the resolved, verified context rather than inferring it from titles alone.
+
+```mermaid
+flowchart LR
+    U[Caller audio or browser text] --> T[Server turn collector]
+    T -->|quiet window / final speech| S[SessionActor]
+    S --> G[ConversationGraph: evidence and provenance]
+    G --> M[SessionMemory: bounded working state]
+    M --> R[Deterministic reference resolver]
+    R -->|ambiguous only| F[Fast LLM planner]
+    R -->|resolved context| A[Main LLM]
+    F --> A
+    A -->|answer + verified references| S
+    A --> I[Background graph improver]
+    I -->|typed proposal| V[Actor validation]
+    V --> G
+    V --> M
+```
+
+Turn-taking is server-authoritative. Browser transcript fragments are debounced by the owning `SessionActor`, so nearby messages become one final user turn before the fast LLM runs. Voice pipelines use VAD and final STT events; partial transcripts only extend the quiet window. Caller audio is preserved for live VAD/STT, while the archival recording path performs bounded level normalization on the caller channel when it assembles the final S3/R2 WAV. This improves quiet recordings without changing live recognition or assistant playback.
+
+The background graph improver never writes memory directly. It proposes a typed JSON payload containing a topic summary, verified entity IDs, ordinal mappings, aliases, and graph references. The actor validates every proposed node and entity ID against the graph and verified tool data, discarding unknown or malformed fields before storing the proposal as an auditable graph node and rebuilding `SessionMemory`.
+
 ## Services
 
 | Service | Role |
